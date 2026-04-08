@@ -1,0 +1,8 @@
+# User Data
+data/
+
+# Archive Specs
+docs/specs/archive
+
+# Keep tests local only (not pushed)
+backend/tests/
