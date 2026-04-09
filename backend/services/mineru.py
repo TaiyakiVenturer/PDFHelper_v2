@@ -5,6 +5,9 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -28,9 +31,9 @@ _PROGRESS_STAGES: tuple[tuple[tuple[str, ...], float, float, str], ...] = (
 
 
 class OutputFilePaths(BaseModel):
-    markdown: str | None
-    json: str | None
-    images: list[str] = Field(default_factory=list)
+    markdown_path: str | None
+    json_path: str | None
+    image_path: list[str] = Field(default_factory=list)
 
 
 class ProcessResult(BaseModel):
@@ -118,6 +121,8 @@ class MinerUCLIWrapper:
         self.output_dir = os.path.abspath(output_dir)
         self._on_progress = on_progress
         self.verbose = verbose
+        self._mineru_api_process: subprocess.Popen[str] | None = None
+        self._mineru_api_url: str | None = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -130,6 +135,7 @@ class MinerUCLIWrapper:
         table: bool,
         start: int | None,
         end: int | None,
+        api_url: str | None = None,
     ) -> list[str]:
         # pipeline is the only supported backend.
         command = [
@@ -143,12 +149,158 @@ class MinerUCLIWrapper:
             "-t", str(table).lower(),
         ]
 
+        if api_url:
+            command.extend(["--api-url", api_url])
+
         if start is not None:
             command.extend(["-s", str(start)])
         if end is not None:
             command.extend(["-e", str(end)])
 
         return command
+
+    def _is_api_endpoint_healthy(self, url: str, timeout: float = 1.5) -> bool:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                status_code = getattr(response, "status", 200)
+                return status_code < 500
+        except urllib.error.HTTPError as error:
+            return error.code < 500
+        except urllib.error.URLError:
+            return False
+        except Exception:
+            return False
+
+    def _wait_for_api_health(
+        self,
+        api_url: str,
+        timeout: float = 8.0,
+        interval: float = 0.5,
+    ) -> bool:
+        deadline = time.time() + timeout
+        health_urls = (f"{api_url}/health", api_url)
+
+        while time.time() < deadline:
+            process = self._mineru_api_process
+            if process is not None and process.poll() is not None:
+                return False
+
+            for url in health_urls:
+                if self._is_api_endpoint_healthy(url):
+                    return True
+
+            time.sleep(interval)
+
+        return False
+
+    def startup(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        reload: bool = False,
+        enable_vlm_preload: bool | None = None,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> subprocess.Popen[str]:
+        """Optionally start mineru-api in background for FastAPI app prewarm."""
+        if not host:
+            raise ValueError("host must not be empty")
+        if port < 1 or port > 65535:
+            raise ValueError("port must be between 1 and 65535")
+
+        api_url = f"http://{host}:{port}"
+        if self._mineru_api_process is not None and self._mineru_api_process.poll() is None:
+            if self._wait_for_api_health(api_url):
+                self._mineru_api_url = api_url
+            else:
+                self._mineru_api_url = None
+                logger.warning(
+                    "mineru-api is running but health check failed; --api-url will be skipped"
+                )
+            return self._mineru_api_process
+
+        command = [
+            "mineru-api",
+            "--host", host,
+            "--port", str(port),
+        ]
+
+        if reload:
+            command.append("--reload")
+        if enable_vlm_preload is not None:
+            command.extend([
+                "--enable-vlm-preload",
+                str(enable_vlm_preload).lower(),
+            ])
+
+        process_env = os.environ.copy()
+        if env is not None:
+            process_env.update(dict(env))
+
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                text=True,
+                cwd=cwd,
+                env=process_env,
+            )
+        except FileNotFoundError as error:
+            message = (
+                "mineru-api command not found. "
+                "Ensure mineru[core] is installed and in PATH."
+            )
+            logger.error(message)
+            raise RuntimeError(message) from error
+
+        self._mineru_api_process = process
+        if self._wait_for_api_health(api_url):
+            self._mineru_api_url = api_url
+        else:
+            self._mineru_api_url = None
+            logger.warning(
+                "mineru-api started but health check did not pass in time; --api-url will be skipped"
+            )
+
+        if self.verbose:
+            logger.info(
+                "Started mineru-api prewarm server at %s (healthy=%s)",
+                api_url,
+                self._mineru_api_url is not None,
+            )
+
+        return process
+
+    def shutdown(self, timeout: float = 10.0) -> bool:
+        """Shutdown prewarmed mineru-api process if it was started."""
+        process = self._mineru_api_process
+        if process is None:
+            return False
+
+        if process.poll() is not None:
+            self._mineru_api_process = None
+            self._mineru_api_url = None
+            return False
+
+        try:
+            process.terminate()
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+        except Exception as error:
+            logger.warning("Failed to shutdown mineru-api process cleanly: %s", error)
+            self._mineru_api_process = None
+            self._mineru_api_url = None
+            return False
+
+        self._mineru_api_process = None
+        self._mineru_api_url = None
+        return True
 
     def _find_output_files(
         self,
@@ -183,20 +335,20 @@ class MinerUCLIWrapper:
         elif has_json_v1:
             json_path = json_path_v1
 
-        images: list[str] = []
+        images_path: list[str] = []
         if os.path.isdir(images_dir):
             with os.scandir(images_dir) as entries:
                 for entry in entries:
                     if not entry.is_file():
                         continue
                     if entry.name.lower().endswith((".png", ".jpg", ".jpeg")):
-                        images.append(entry.path)
-            images.sort()
+                        images_path.append(entry.path)
+            images_path.sort()
 
         return OutputFilePaths(
-            markdown=markdown_path if os.path.exists(markdown_path) else None,
-            json=json_path,
-            images=images,
+            markdown_path=markdown_path if os.path.exists(markdown_path) else None,
+            json_path=json_path,
+            image_path=images_path,
         )
 
     def process(
@@ -213,9 +365,9 @@ class MinerUCLIWrapper:
             "success": False,
             "output_path": self.output_dir,
             "output_file_paths": {
-                "markdown": None,
-                "json": None,
-                "images": [],
+                "markdown_path": None,
+                "json_path": None,
+                "image_path": [],
             },
             "processing_time": 0.0,
             "stdout": "",
@@ -241,6 +393,10 @@ class MinerUCLIWrapper:
         last_progress = 0.0
 
         try:
+            if self._mineru_api_process is not None and self._mineru_api_process.poll() is not None:
+                self._mineru_api_process = None
+                self._mineru_api_url = None
+
             (
                 processing_stem,
                 pdf_path_to_use,
@@ -258,6 +414,7 @@ class MinerUCLIWrapper:
                 table=table,
                 start=start,
                 end=end,
+                api_url=self._mineru_api_url,
             )
 
             if self.verbose:
