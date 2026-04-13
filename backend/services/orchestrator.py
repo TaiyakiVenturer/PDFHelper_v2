@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict
 import json
 import os
@@ -40,31 +41,12 @@ class PipelineOrchestrator:
         os.makedirs(self._chroma_dir, exist_ok=True)
 
         self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._mineru_output_dir)
-
-        # TODO: initialize TranslateGemma service instance.
-        self._translate_service = None
+        self._translate_service = ModelTranslator()
+        
         # TODO: initialize markdown reconstructor service instance.
         self._md_reconstructor = None
         # TODO: initialize ChromaDB indexer/retrieval service instance.
         self._chroma_service = None
-
-    @staticmethod
-    def _derive_v1_v2_paths(json_path: str) -> tuple[str, str, str]:
-        json_file = Path(json_path)
-        parent = json_file.parent
-        name = json_file.name
-
-        if name.endswith("_content_list_v2.json"):
-            stem = name.removesuffix("_content_list_v2.json")
-        elif name.endswith("_content_list.json"):
-            stem = name.removesuffix("_content_list.json")
-        else:
-            stem = json_file.stem
-
-        v1_path = str(parent / f"{stem}_content_list.json")
-        v2_path = str(parent / f"{stem}_content_list_v2.json")
-        merged_path = str(parent / f"{stem}_content_list_merged.json")
-        return v1_path, v2_path, merged_path
 
     @staticmethod
     def _derive_collection_stem(json_path: str) -> str:
@@ -113,19 +95,29 @@ class PipelineOrchestrator:
             )
 
         try:
-            if process_result.output_file_paths.json_path is None:
+            output_paths = process_result.output_file_paths
+            if output_paths.json_v1_path is None or output_paths.json_v2_path is None:
+                missing_versions: list[str] = []
+                if output_paths.json_v1_path is None:
+                    missing_versions.append("v1")
+                if output_paths.json_v2_path is None:
+                    missing_versions.append("v2")
                 return ParseResultMessage(
                     success=False,
                     processing_time=time.time() - start_time,
-                    error="MinerU output json path is missing",
+                    error=(
+                        "MinerU output json path is missing: "
+                        + ", ".join(missing_versions)
+                    ),
                     error_code="PIPE_PARSE_OUTPUT_MISSING",
                     error_category=ErrorCategory.PIPELINE,
                     retryable=False,
                 )
 
-            v1_path, v2_path, merged_json_path = self._derive_v1_v2_paths(
-                process_result.output_file_paths.json_path
-            )
+            v1_path = output_paths.json_v1_path
+            v2_path = output_paths.json_v2_path
+            stem = self._derive_collection_stem(v2_path)
+            merged_json_path = str(Path(v2_path).with_name(f"{stem}_content_list_merged.json"))
             merged_items = content_merger.load_and_merge(v1_path, v2_path)
 
             with open(merged_json_path, "w", encoding="utf-8") as merged_file:
@@ -215,17 +207,13 @@ class PipelineOrchestrator:
                     retryable=False,
                 )
 
-            translate_service = self._translate_service
-            if translate_service is None:
-                translate_service = ModelTranslator()
-                self._translate_service = translate_service
-
             translated_items: list[object] = []
             translated_count = 0
             skipped_count = 0
             total_items = len(source_data)
+            translation_history: deque[dict[str, str]] = deque(maxlen=5)
 
-            with translate_service as translator:
+            with self._translate_service as translator:
                 for index, item in enumerate(source_data):
                     if not isinstance(item, dict):
                         skipped_count += 1
@@ -241,12 +229,19 @@ class PipelineOrchestrator:
                                 text,
                                 src_lang,
                                 tgt_lang,
+                                history=list(translation_history),
                             )
                             translated_item["translated_text"] = translated_text
                             if translated_text.strip() == "":
                                 skipped_count += 1
                             else:
                                 translated_count += 1
+                                translation_history.append(
+                                    {
+                                        "source_text": text,
+                                        "translated_text": translated_text,
+                                    }
+                                )
                         translated_items.append(translated_item)
 
                     if on_progress is not None and total_items > 0:
@@ -351,8 +346,8 @@ class PipelineOrchestrator:
         # Expected output: answer string.
         return QueryResponse(answer="", sources=[])
 
-    def get_file_status(self, collection_name: str) -> FileStatusResponse:
-        parsed_dir = Path(self._mineru_output_dir) / collection_name / "auto"
+    def get_file_status(self, collection_name: str, method: str = "auto") -> FileStatusResponse:
+        parsed_dir = Path(self._mineru_output_dir) / collection_name / method
         parsed_indicators = [
             parsed_dir / f"{collection_name}_content_list_merged.json",
             parsed_dir / f"{collection_name}_content_list_v2.json",

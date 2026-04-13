@@ -32,7 +32,8 @@ _PROGRESS_STAGES: tuple[tuple[tuple[str, ...], float, float, str], ...] = (
 
 class OutputFilePaths(BaseModel):
     markdown_path: str | None
-    json_path: str | None
+    json_v1_path: str | None
+    json_v2_path: str | None
     image_path: list[str] = Field(default_factory=list)
 
 
@@ -178,11 +179,8 @@ class MinerUCLIWrapper:
         if not os.path.exists(images_dir):
             logger.warning("Expected image directory missing: %s", images_dir)
 
-        json_path: str | None = None
-        if has_json_v2:
-            json_path = json_path_v2
-        elif has_json_v1:
-            json_path = json_path_v1
+        json_v1_path = json_path_v1 if has_json_v1 else None
+        json_v2_path = json_path_v2 if has_json_v2 else None
 
         images_path: list[str] = []
         if os.path.isdir(images_dir):
@@ -196,7 +194,8 @@ class MinerUCLIWrapper:
 
         return OutputFilePaths(
             markdown_path=markdown_path if os.path.exists(markdown_path) else None,
-            json_path=json_path,
+            json_v1_path=json_v1_path,
+            json_v2_path=json_v2_path,
             image_path=images_path,
         )
 
@@ -216,7 +215,8 @@ class MinerUCLIWrapper:
             "output_path": self.output_dir,
             "output_file_paths": {
                 "markdown_path": None,
-                "json_path": None,
+                "json_v1_path": None,
+                "json_v2_path": None,
                 "image_path": [],
             },
             "processing_time": 0.0,

@@ -6,6 +6,8 @@ import gc
 import logging
 from pathlib import Path
 from typing import Any
+from typing import Mapping
+from typing import Sequence
 
 try:
     from huggingface_hub import hf_hub_download
@@ -18,6 +20,9 @@ except ImportError:  # pragma: no cover
     Llama = None
 
 logger = logging.getLogger(__name__)
+
+CONTEXT_PREVIEW_CHARS = 180
+MAX_EMPTY_OUTPUT_ATTEMPTS = 3
 
 HF_REPO_ID = "bartowski/Qwen2.5-7B-Instruct-GGUF"
 HF_FILENAME = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
@@ -110,6 +115,10 @@ def ensure_model_downloaded(model_dir: Path = DEFAULT_MODEL_DIR) -> Path:
     return model_path
 
 
+class TranslationGenerationError(RuntimeError):
+    """Raised when model output stays empty for non-empty source text."""
+
+
 class ModelTranslator:
     """Single-paragraph translator backed by a local GGUF model."""
 
@@ -117,7 +126,7 @@ class ModelTranslator:
         self,
         model_dir: Path = DEFAULT_MODEL_DIR,
         n_gpu_layers: int = -1,
-        n_ctx: int = 2048,
+        n_ctx: int = 4096,
         verbose: bool = False,
     ) -> None:
         self.model_dir = Path(model_dir)
@@ -126,7 +135,53 @@ class ModelTranslator:
         self.verbose = verbose
 
         self._llm: Any | None = None
+        # Model file verification/download is deferred until actual load.
+        self.model_path = self.model_dir / HF_FILENAME
+
+    def __enter__(self) -> "ModelTranslator":
+        self._load()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> bool:
+        try:
+            self._unload()
+        finally:
+            pass
+        return False
+
+    def _load(self) -> None:
+        if self._llm is not None:
+            logger.warning("模型已載入，跳過重複載入")
+            return
+
+        if Llama is None:
+            raise RuntimeError(
+                "llama-cpp-python 未安裝，無法載入模型。請先安裝 llama-cpp-python。"
+            )
+
         self.model_path = ensure_model_downloaded(self.model_dir)
+        logger.info("正在載入翻譯模型: %s", self.model_path)
+        self._llm = Llama(
+            model_path=str(self.model_path),
+            n_gpu_layers=self.n_gpu_layers,
+            n_ctx=self.n_ctx,
+            verbose=self.verbose,
+        )
+        logger.info("翻譯模型載入完成")
+
+    def _unload(self) -> None:
+        if self._llm is None:
+            return
+
+        del self._llm
+        self._llm = None
+        gc.collect()
+        logger.info("模型已卸載，VRAM 已釋放")
 
     @staticmethod
     def _extract_text_from_response(response: dict[str, Any]) -> str:
@@ -177,51 +232,103 @@ class ModelTranslator:
 
         return self._extract_text_from_response(response)
 
-    def _load(self) -> None:
-        if self._llm is not None:
-            logger.warning("模型已載入，跳過重複載入")
-            return
+    def _generate_translation_with_retry(
+        self,
+        user_prompt: str,
+        src_lang: str,
+        tgt_lang: str,
+        source_text: str,
+    ) -> str:
+        for attempt in range(1, MAX_EMPTY_OUTPUT_ATTEMPTS + 1):
+            result = self._generate_translation(user_prompt).strip()
+            if result:
+                return result
 
-        if Llama is None:
-            raise RuntimeError(
-                "llama-cpp-python 未安裝，無法載入模型。請先安裝 llama-cpp-python。"
+            logger.warning(
+                "翻譯輸出為空，重試中 (%s/%s, src=%s, tgt=%s)",
+                attempt,
+                MAX_EMPTY_OUTPUT_ATTEMPTS,
+                src_lang,
+                tgt_lang,
             )
 
-        logger.info("正在載入翻譯模型: %s", self.model_path)
-        self._llm = Llama(
-            model_path=str(self.model_path),
-            n_gpu_layers=self.n_gpu_layers,
-            n_ctx=self.n_ctx,
-            verbose=self.verbose,
+        raise TranslationGenerationError(
+            "模型在非空輸入下連續產生空翻譯輸出"
+            f" (src={src_lang}, tgt={tgt_lang}, text={source_text[:80]!r})"
         )
-        logger.info("翻譯模型載入完成")
 
-    def _unload(self) -> None:
-        if self._llm is None:
-            return
+    @staticmethod
+    def _flatten_multiline_text(text: str) -> str:
+        parts = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(parts) <= 1:
+            return text
+        return " ".join(parts)
 
-        del self._llm
-        self._llm = None
-        gc.collect()
-        logger.info("模型已卸載，VRAM 已釋放")
+    @staticmethod
+    def _normalize_history_pairs(
+        history: Sequence[Mapping[str, str]] | None,
+    ) -> list[tuple[str, str]]:
+        if not history:
+            return []
 
-    def __enter__(self) -> "ModelTranslator":
-        self._load()
-        return self
+        pairs: list[tuple[str, str]] = []
+        pending_user: str | None = None
 
-    def __exit__(
+        for item in history:
+            source_text = str(
+                item.get("source_text")
+                or item.get("source")
+                or item.get("text")
+                or ""
+            ).strip()
+            translated_text = str(
+                item.get("translated_text")
+                or item.get("target_text")
+                or item.get("translation")
+                or ""
+            ).strip()
+
+            if source_text and translated_text:
+                pairs.append((source_text, translated_text))
+                continue
+
+            role = str(item.get("role") or "").strip().lower()
+            content = str(item.get("content") or "").strip()
+            if role == "user" and content:
+                pending_user = content
+                continue
+            if role in ("assistant", "model") and content and pending_user:
+                pairs.append((pending_user, content))
+                pending_user = None
+
+        return pairs[-5:]
+
+    @classmethod
+    def _build_context_block(
+        cls,
+        history: Sequence[Mapping[str, str]] | None,
+    ) -> str:
+        context_pairs = cls._normalize_history_pairs(history)
+        if not context_pairs:
+            return ""
+
+        context_lines = [
+            "Previous translation context (most recent last, for terminology consistency only):"
+        ]
+        for index, (src_text, tgt_text) in enumerate(context_pairs, start=1):
+            src_preview = src_text.strip().replace("\n", " ")[:CONTEXT_PREVIEW_CHARS]
+            tgt_preview = tgt_text.strip().replace("\n", " ")[:CONTEXT_PREVIEW_CHARS]
+            context_lines.append(f"[Context {index} Source] {src_preview}")
+            context_lines.append(f"[Context {index} Target] {tgt_preview}")
+        return "\n".join(context_lines) + "\n\n"
+
+    def translate_paragraph(
         self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
-    ) -> bool:
-        try:
-            self._unload()
-        finally:
-            pass
-        return False
-
-    def translate_paragraph(self, text: str, src_lang: str, tgt_lang: str) -> str:
+        text: str,
+        src_lang: str,
+        tgt_lang: str,
+        history: Sequence[Mapping[str, str]] | None = None,
+    ) -> str:
         if self._llm is None:
             raise RuntimeError("ModelTranslator 尚未載入模型，請在 with 區塊內呼叫")
 
@@ -233,41 +340,22 @@ class ModelTranslator:
 
         src_display, _src_iso = LANG_MAP[src_lang]
         tgt_display, _tgt_iso = LANG_MAP[tgt_lang]
-        lines = text.splitlines()
-        if len(lines) <= 1:
-            user_prompt = (
-                f"Translate the following text from {src_display} to {tgt_display}.\n"
-                "Return only the translated text in the target language.\n"
-                "Translate all natural language words. Keep only URLs, emails, code tokens, and file/API paths unchanged.\n"
-                "<SOURCE_TEXT>\n"
-                f"{text}\n"
-                "</SOURCE_TEXT>"
-            )
-            result = self._generate_translation(user_prompt)
-        else:
-            translated_lines: list[str] = []
-            for line in lines:
-                if line.strip() == "":
-                    translated_lines.append("")
-                    continue
+        context_block = self._build_context_block(history)
+        source_text = self._flatten_multiline_text(text)
+        user_prompt = (
+            f"Translate the following text from {src_display} to {tgt_display}.\n"
+            f"{context_block}"
+            "Return only the translated text in the target language.\n"
+            "Translate all natural language words. Keep only URLs, emails, code tokens, and file/API paths unchanged.\n"
+            "<SOURCE_TEXT>\n"
+            f"{source_text}\n"
+            "</SOURCE_TEXT>"
+        )
+        result = self._generate_translation_with_retry(
+            user_prompt,
+            src_lang,
+            tgt_lang,
+            source_text,
+        )
 
-                line_prompt = (
-                    f"Translate this one line from {src_display} to {tgt_display}.\n"
-                    "Return exactly one translated line only.\n"
-                    "Translate all natural language words. Keep only URLs, emails, code tokens, and file/API paths unchanged.\n"
-                    "<SOURCE_LINE>\n"
-                    f"{line}\n"
-                    "</SOURCE_LINE>"
-                )
-                translated = self._generate_translation(line_prompt)
-                translated_lines.append(translated.replace("\n", " ").strip())
-
-            result = "\n".join(translated_lines).strip()
-
-        if not result:
-            logger.warning(
-                "翻譯結果為空字串 (src=%s, tgt=%s)",
-                src_lang,
-                tgt_lang,
-            )
         return result
