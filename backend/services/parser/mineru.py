@@ -5,9 +5,6 @@ import re
 import shutil
 import subprocess
 import time
-import urllib.error
-import urllib.request
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -15,17 +12,20 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[float, str], None]
 
 _TQDM_PERCENT_PATTERN = re.compile(r"(?P<pct>\d{1,3})%\|")
 _PROGRESS_STAGES: tuple[tuple[tuple[str, ...], float, float, str], ...] = (
-    (("submitting batch", "start mineru fastapi service",), 2.0, 4.0, "處理中: 初始化 MinerU 服務",),
-    (("fetching", "docanalysis init", "model init",), 4.0, 20.0, "處理中: 載入模型與資源",),
-    (("layout predict",), 20.0, 45.0, "處理中: 版面預測"),
-    (("table-ocr det", "table-ocr rec", "table-ocr",), 45.0, 65.0, "處理中: 表格 OCR 辨識",),
-    (("table-wireless", "table-wired",), 65.0, 78.0, "處理中: 表格結構預測",),
-    (("ocr-det", "ocr-rec", "seal predict",), 78.0, 90.0, "處理中: 文字辨識",),
-    (("processing pages",), 90.0, 99.0, "處理中: 最後處理頁面"),
+    (("submitting batch", "start mineru fastapi service",), 1.0, 3.0, "處理中: 初始化任務",),
+    (("fetching", "docanalysis init", "model init",), 3.0, 10.0, "處理中: 載入模型與資源",),
+    (("layout predict",), 10.0, 28.0, "處理中: 版面分析"),
+    (("mfr predict",), 28.0, 48.0, "處理中: 圖文內容解析"),
+    (("table-ocr det",), 48.0, 56.0, "處理中: 表格文字偵測",),
+    (("table-ocr rec", "table-ocr",), 56.0, 70.0, "處理中: 表格文字辨識",),
+    (("table-wireless", "table-wired",), 70.0, 80.0, "處理中: 表格結構預測",),
+    (("ocr-det",), 80.0, 88.0, "處理中: 內文文字偵測",),
+    (("seal predict",), 88.0, 90.0, "處理中: 印章與特殊區塊判定",),
+    (("processing pages",), 90.0, 97.0, "處理中: 頁面後處理"),
+    (("ocr-rec",), 97.0, 99.0, "處理中: 文字最終辨識",),
     (("completed batch", "batch finished",), 99.0, 100.0, "處理完成",),
 )
 
@@ -112,17 +112,13 @@ class MinerUCLIWrapper:
     def __init__(
         self,
         output_dir: str,
-        on_progress: ProgressCallback | None = None,
         verbose: bool = False,
     ) -> None:
         if not os.path.isabs(output_dir):
             raise ValueError("output_dir must be an absolute path")
 
         self.output_dir = os.path.abspath(output_dir)
-        self._on_progress = on_progress
         self.verbose = verbose
-        self._mineru_api_process: subprocess.Popen[str] | None = None
-        self._mineru_api_url: str | None = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -135,7 +131,6 @@ class MinerUCLIWrapper:
         table: bool,
         start: int | None,
         end: int | None,
-        api_url: str | None = None,
     ) -> list[str]:
         # pipeline is the only supported backend.
         command = [
@@ -149,158 +144,12 @@ class MinerUCLIWrapper:
             "-t", str(table).lower(),
         ]
 
-        if api_url:
-            command.extend(["--api-url", api_url])
-
         if start is not None:
             command.extend(["-s", str(start)])
         if end is not None:
             command.extend(["-e", str(end)])
 
         return command
-
-    def _is_api_endpoint_healthy(self, url: str, timeout: float = 1.5) -> bool:
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
-                status_code = getattr(response, "status", 200)
-                return status_code < 500
-        except urllib.error.HTTPError as error:
-            return error.code < 500
-        except urllib.error.URLError:
-            return False
-        except Exception:
-            return False
-
-    def _wait_for_api_health(
-        self,
-        api_url: str,
-        timeout: float = 8.0,
-        interval: float = 0.5,
-    ) -> bool:
-        deadline = time.time() + timeout
-        health_urls = (f"{api_url}/health", api_url)
-
-        while time.time() < deadline:
-            process = self._mineru_api_process
-            if process is not None and process.poll() is not None:
-                return False
-
-            for url in health_urls:
-                if self._is_api_endpoint_healthy(url):
-                    return True
-
-            time.sleep(interval)
-
-        return False
-
-    def startup(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 8000,
-        reload: bool = False,
-        enable_vlm_preload: bool | None = None,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-    ) -> subprocess.Popen[str]:
-        """Optionally start mineru-api in background for FastAPI app prewarm."""
-        if not host:
-            raise ValueError("host must not be empty")
-        if port < 1 or port > 65535:
-            raise ValueError("port must be between 1 and 65535")
-
-        api_url = f"http://{host}:{port}"
-        if self._mineru_api_process is not None and self._mineru_api_process.poll() is None:
-            if self._wait_for_api_health(api_url):
-                self._mineru_api_url = api_url
-            else:
-                self._mineru_api_url = None
-                logger.warning(
-                    "mineru-api is running but health check failed; --api-url will be skipped"
-                )
-            return self._mineru_api_process
-
-        command = [
-            "mineru-api",
-            "--host", host,
-            "--port", str(port),
-        ]
-
-        if reload:
-            command.append("--reload")
-        if enable_vlm_preload is not None:
-            command.extend([
-                "--enable-vlm-preload",
-                str(enable_vlm_preload).lower(),
-            ])
-
-        process_env = os.environ.copy()
-        if env is not None:
-            process_env.update(dict(env))
-
-        try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                text=True,
-                cwd=cwd,
-                env=process_env,
-            )
-        except FileNotFoundError as error:
-            message = (
-                "mineru-api command not found. "
-                "Ensure mineru[core] is installed and in PATH."
-            )
-            logger.error(message)
-            raise RuntimeError(message) from error
-
-        self._mineru_api_process = process
-        if self._wait_for_api_health(api_url):
-            self._mineru_api_url = api_url
-        else:
-            self._mineru_api_url = None
-            logger.warning(
-                "mineru-api started but health check did not pass in time; --api-url will be skipped"
-            )
-
-        if self.verbose:
-            logger.info(
-                "Started mineru-api prewarm server at %s (healthy=%s)",
-                api_url,
-                self._mineru_api_url is not None,
-            )
-
-        return process
-
-    def shutdown(self, timeout: float = 10.0) -> bool:
-        """Shutdown prewarmed mineru-api process if it was started."""
-        process = self._mineru_api_process
-        if process is None:
-            return False
-
-        if process.poll() is not None:
-            self._mineru_api_process = None
-            self._mineru_api_url = None
-            return False
-
-        try:
-            process.terminate()
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
-        except Exception as error:
-            logger.warning("Failed to shutdown mineru-api process cleanly: %s", error)
-            self._mineru_api_process = None
-            self._mineru_api_url = None
-            return False
-
-        self._mineru_api_process = None
-        self._mineru_api_url = None
-        return True
 
     def _find_output_files(
         self,
@@ -360,6 +209,7 @@ class MinerUCLIWrapper:
         table: bool = True,
         start: int | None = None,
         end: int | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
     ) -> ProcessResult:
         base_result = {
             "success": False,
@@ -393,10 +243,6 @@ class MinerUCLIWrapper:
         last_progress = 0.0
 
         try:
-            if self._mineru_api_process is not None and self._mineru_api_process.poll() is not None:
-                self._mineru_api_process = None
-                self._mineru_api_url = None
-
             (
                 processing_stem,
                 pdf_path_to_use,
@@ -414,15 +260,14 @@ class MinerUCLIWrapper:
                 table=table,
                 start=start,
                 end=end,
-                api_url=self._mineru_api_url,
             )
 
             if self.verbose:
                 logger.info("Running MinerU command: %s", " ".join(command))
 
-            if self._on_progress is not None:
+            if on_progress is not None:
                 try:
-                    self._on_progress(1.0, "處理中: 初始化 MinerU CLI")
+                    on_progress(1.0, "處理中: 初始化 MinerU CLI")
                     last_progress = 1.0
                 except Exception as callback_error:
                     logger.warning(
@@ -451,14 +296,14 @@ class MinerUCLIWrapper:
                 full_output.append(line)
 
                 parsed = _parse_progress_line(line)
-                if parsed is not None and self._on_progress is not None:
+                if parsed is not None and on_progress is not None:
                     progress_percent, progress_message = parsed
                     if progress_percent < last_progress:
                         progress_percent = last_progress
                     else:
                         last_progress = progress_percent
                     try:
-                        self._on_progress(progress_percent, progress_message)
+                        on_progress(progress_percent, progress_message)
                     except Exception as callback_error:
                         logger.warning(
                             "Progress callback raised error: %s",
@@ -498,9 +343,9 @@ class MinerUCLIWrapper:
                 "returncode": return_code,
             }
 
-            if self._on_progress is not None and last_progress < 100.0:
+            if on_progress is not None and last_progress < 100.0:
                 try:
-                    self._on_progress(100.0, "處理完成")
+                    on_progress(100.0, "處理完成")
                 except Exception as callback_error:
                     logger.warning(
                         "Progress callback raised error: %s",

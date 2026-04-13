@@ -1,8 +1,17 @@
+# VSCode settings
+.vscode/
+
 # User Data
 data/
+
+# Models
+models/
 
 # Archive Specs
 docs/specs/archive
 
 # Keep tests local only (not pushed)
 backend/tests/
+
+# Unit Test Files
+.coverage
