@@ -19,11 +19,16 @@ class MinerUItem:
     type_v2: str
     text: str
     translated_text: str | None
+    list_items: list[str] | None
+    sub_type: str | None
+    text_level: int | None
     bbox: list[int]
     page_idx: int
     img_path: str | None
     table_html: str | None
     math_latex: str | None
+    code_body: str | None
+    footnote: list[str] | None
     title_level: int | None
     caption: list[str] | None
 
@@ -107,24 +112,251 @@ def _extract_spans(spans: list[dict] | None, skip_equation_inline: bool = False)
     return " ".join(collected).strip()
 
 
+def _extract_text_list(
+    raw_entries: object,
+    *,
+    field_name: str,
+    nested_span_key: str | None = None,
+) -> list[str] | None:
+    """Normalize mixed list payloads into a list of plain text strings."""
+    if raw_entries is None:
+        return None
+
+    if not isinstance(raw_entries, list):
+        logger.warning("Skip non-list %s: %r", field_name, raw_entries)
+        return None
+
+    normalized: list[str] = []
+    for entry in raw_entries:
+        text = ""
+
+        if isinstance(entry, str):
+            text = entry.strip()
+        elif isinstance(entry, dict):
+            if nested_span_key is not None and isinstance(entry.get(nested_span_key), list):
+                text = _extract_spans(entry.get(nested_span_key))
+            else:
+                text = _extract_spans([entry])
+        elif isinstance(entry, list) and all(isinstance(span, dict) for span in entry):
+            text = _extract_spans(entry)
+        else:
+            logger.warning("Skip unsupported %s entry: %r", field_name, entry)
+
+        stripped = text.strip()
+        if stripped:
+            normalized.append(stripped)
+
+    return normalized or None
+
+
+def _normalize_list_items(v1_list_items: object, v2_list_items: object) -> list[str] | None:
+    """Normalize reference/list entries from v1 and v2 formats."""
+    from_v1 = _extract_text_list(v1_list_items, field_name="list_items")
+    if from_v1:
+        return from_v1
+
+    return _extract_text_list(
+        v2_list_items,
+        field_name="list_items",
+        nested_span_key="item_content",
+    )
+
+
+def _extract_v2_text(content: dict, key: str) -> str:
+    """Extract text from a v2 content key that stores span arrays."""
+    value = content.get(key)
+    if isinstance(value, list):
+        return _extract_spans(value)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _extract_single_span_block(raw_value: object) -> list[str] | None:
+    """Treat a span array as one logical text block."""
+    if isinstance(raw_value, list) and all(isinstance(item, dict) for item in raw_value):
+        text = _extract_spans(raw_value)
+        if text:
+            return [text]
+    return None
+
+
+def _derive_text(v1: dict, type_v2: str, content: dict) -> str:
+    """Derive primary text with v1-first and v2 fallback strategy."""
+    from_v1 = str(v1.get("text", "") or "").strip()
+    if from_v1:
+        return from_v1
+
+    key_by_v2_type = {
+        "paragraph": "paragraph_content",
+        "title": "title_content",
+        "page_header": "page_header_content",
+        "page_footer": "page_footer_content",
+        "page_number": "page_number_content",
+        "page_footnote": "page_footnote_content",
+        "aside_text": "aside_text_content",
+    }
+    key = key_by_v2_type.get(type_v2)
+    if key is not None:
+        return _extract_v2_text(content, key)
+
+    return ""
+
+
+def _derive_sub_type(v1: dict, type_v2: str, content: dict) -> str | None:
+    """Normalize sub_type across v1/v2 conventions."""
+    v1_sub_type = v1.get("sub_type")
+    if isinstance(v1_sub_type, str) and v1_sub_type.strip():
+        return v1_sub_type.strip()
+
+    if type_v2 == "list":
+        list_type = content.get("list_type")
+        if isinstance(list_type, str) and list_type.strip():
+            if list_type == "reference_list":
+                return "ref_text"
+            return list_type.strip()
+
+    if type_v2 == "algorithm":
+        return "algorithm"
+
+    if type_v2 == "code":
+        for key in ("sub_type", "code_subtype", "code_type"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return None
+
+
+def _derive_code_body(v1: dict, type_v2: str, content: dict) -> str | None:
+    """Derive code/algorithm body with v1-first and v2 fallback."""
+    v1_code_body = v1.get("code_body")
+    if isinstance(v1_code_body, str) and v1_code_body.strip():
+        return v1_code_body
+
+    if type_v2 == "algorithm":
+        text = _extract_v2_text(content, "algorithm_content")
+        return text or None
+
+    if type_v2 == "code":
+        text = _extract_v2_text(content, "code_content")
+        return text or None
+
+    return None
+
+
+def _derive_text_level(v1: dict, type_v2: str, content: dict) -> int | None:
+    """Derive heading level from v1 text_level or v2 title level."""
+    raw_text_level = v1.get("text_level")
+    if isinstance(raw_text_level, int):
+        return raw_text_level
+
+    if type_v2 == "title":
+        raw_level = content.get("level")
+        if isinstance(raw_level, int):
+            return raw_level
+
+    return None
+
+
+def _derive_title_level(type_v2: str, content: dict, text_level: int | None) -> int | None:
+    """Keep backward-compatible title_level while supporting v1 heading levels."""
+    if type_v2 == "title":
+        raw_level = content.get("level")
+        if isinstance(raw_level, int):
+            return raw_level
+    return text_level
+
+
+def _derive_img_path(v1: dict, content: dict) -> str | None:
+    """Derive image path from v2 image_source with v1 img_path fallback."""
+    image_source = content.get("image_source")
+    if isinstance(image_source, dict):
+        image_path = image_source.get("path")
+        if isinstance(image_path, str) and image_path.strip():
+            return image_path
+
+    v1_img_path = v1.get("img_path")
+    if isinstance(v1_img_path, str) and v1_img_path.strip():
+        return v1_img_path
+
+    return None
+
+
+def _derive_caption(v1: dict, type_v2: str, content: dict) -> list[str] | None:
+    """Derive caption list from v2 content or v1 fallback fields."""
+    key_by_type = {
+        "image": "image_caption",
+        "table": "table_caption",
+        "chart": "chart_caption",
+        "algorithm": "algorithm_caption",
+        "code": "code_caption",
+    }
+    key = key_by_type.get(type_v2)
+    if key is None:
+        return None
+
+    from_v2 = _extract_single_span_block(content.get(key))
+    if from_v2:
+        return from_v2
+
+    from_v2 = _extract_text_list(content.get(key), field_name=key)
+    if from_v2:
+        return from_v2
+
+    return _extract_text_list(v1.get(key), field_name=key)
+
+
+def _derive_footnote(v1: dict, type_v2: str, content: dict) -> list[str] | None:
+    """Derive footnote list from v2 content or v1 fallback fields."""
+    key_by_type = {
+        "image": "image_footnote",
+        "table": "table_footnote",
+        "chart": "chart_footnote",
+        "algorithm": "algorithm_footnote",
+        "code": "code_footnote",
+    }
+    key = key_by_type.get(type_v2)
+    if key is not None:
+        from_v2 = _extract_single_span_block(content.get(key))
+        if from_v2:
+            return from_v2
+
+        from_v2 = _extract_text_list(content.get(key), field_name=key)
+        if from_v2:
+            return from_v2
+        return _extract_text_list(v1.get(key), field_name=key)
+
+    if type_v2 == "page_footnote":
+        from_v2 = _extract_single_span_block(content.get("page_footnote_content"))
+        if from_v2:
+            return from_v2
+
+        from_v2 = _extract_text_list(content.get("page_footnote_content"), field_name="page_footnote")
+        if from_v2:
+            return from_v2
+
+    return None
+
+
 def _merge_item(v1: dict, v2: dict) -> MinerUItem:
     """Merge one v1 item and one matched v2 item into a MinerUItem."""
     type_v1 = str(v1.get("type", "unknown") or "unknown")
     type_v2 = str(v2.get("type", "unknown") or "unknown")
 
-    text = str(v1.get("text", "") or "")
+    raw_content = v2.get("content", {})
+    content = raw_content if isinstance(raw_content, dict) else {}
+
+    text = _derive_text(v1, type_v2, content)
+    list_items = _normalize_list_items(v1.get("list_items"), content.get("list_items"))
+    sub_type = _derive_sub_type(v1, type_v2, content)
+    text_level = _derive_text_level(v1, type_v2, content)
     page_idx = int(v1.get("page_idx", 0) or 0)
 
     raw_bbox = v1.get("bbox", [])
     bbox = raw_bbox if isinstance(raw_bbox, list) else []
 
-    raw_content = v2.get("content", {})
-    content = raw_content if isinstance(raw_content, dict) else {}
-
-    title_level: int | None = None
-    if type_v2 == "title":
-        level = content.get("level")
-        title_level = int(level) if isinstance(level, int) else None
+    title_level = _derive_title_level(type_v2, content, text_level)
 
     math_latex: str | None = None
     if type_v2 == "equation_interline":
@@ -147,39 +379,26 @@ def _merge_item(v1: dict, v2: dict) -> MinerUItem:
         if isinstance(html_v1, str) and html_v1.strip():
             table_html = html_v1
 
-    img_path: str | None = None
-    image_source = content.get("image_source")
-    if isinstance(image_source, dict):
-        image_path = image_source.get("path")
-        if isinstance(image_path, str) and image_path.strip():
-            img_path = image_path
-
-    caption_key_by_type = {
-        "image": "image_caption",
-        "table": "table_caption",
-        "chart": "chart_caption",
-        "algorithm": "algorithm_caption",
-        "code": "code_caption",
-    }
-    caption: list[str] | None = None
-    caption_key = caption_key_by_type.get(type_v2)
-    if caption_key is not None:
-        raw_caption = content.get(caption_key)
-        spans = raw_caption if isinstance(raw_caption, list) else []
-        caption_text = _extract_spans(spans)
-        if caption_text:
-            caption = [caption_text]
+    img_path = _derive_img_path(v1, content)
+    code_body = _derive_code_body(v1, type_v2, content)
+    caption = _derive_caption(v1, type_v2, content)
+    footnote = _derive_footnote(v1, type_v2, content)
 
     return MinerUItem(
         type_v1=type_v1,
         type_v2=type_v2,
         text=text,
         translated_text=None,
+        list_items=list_items,
+        sub_type=sub_type,
+        text_level=text_level,
         bbox=bbox,
         page_idx=page_idx,
         img_path=img_path,
         table_html=table_html,
         math_latex=math_latex,
+        code_body=code_body,
+        footnote=footnote,
         title_level=title_level,
         caption=caption,
     )

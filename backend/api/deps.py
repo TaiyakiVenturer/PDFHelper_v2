@@ -11,14 +11,13 @@ from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from services.orchestrator import PipelineOrchestrator
-from services.orchestrator import create_orchestrator
 from services.error_utils import build_error_message
 from schemas.response import ProgressMessage
 
 REQUEST_PAYLOAD_TIMEOUT_SEC = 10.0
 
 _DATA_DIR = str((Path(__file__).resolve().parents[2] / "data").resolve())
-_ORCHESTRATOR = create_orchestrator(data_dir=_DATA_DIR)
+_ORCHESTRATOR = PipelineOrchestrator(data_dir=_DATA_DIR)
 RequestT = TypeVar("RequestT", bound=BaseModel)
 ResultT = TypeVar("ResultT", bound=BaseModel)
 

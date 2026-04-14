@@ -48,11 +48,10 @@ PDFHelper_v2/
 │   │   ├── orchestrator.py  # pipeline 編排
 │   │   ├── parser/          # parse 相關服務
 │   │   └── translator/      # translate 相關服務
-│   ├── tests/               # 後端測試
 │   └── pyproject.toml       # 後端相依與設定
 ├── data/
 │   ├── pdfs/                # 待處理 PDF
-│   └── mineru_outputs/      # 解析輸出
+│   └── artifacts/           # 統一流程產物（parse/translate 等）
 ├── docs/                    # 規格與文件
 └── frontend/                # 前端（待整合）
 ```
@@ -104,7 +103,7 @@ uv run main.py
 
 ## 輸出內容
 
-預設輸出位置在 data/mineru_outputs/ 與 data/translated/，每份文件通常包含：
+預設輸出位置在 data/artifacts/{stem}/{method}/，每份文件通常包含：
 
 - *_content_list_merged.json: parse 階段合併後內容
 - *_translated.json: translate 階段輸出

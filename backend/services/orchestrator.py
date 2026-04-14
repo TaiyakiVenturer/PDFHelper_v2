@@ -31,16 +31,14 @@ class PipelineOrchestrator:
 
         self._data_dir = data_dir_abs
         self._pdf_dir = os.path.join(self._data_dir, "pdfs")
-        self._mineru_output_dir = os.path.join(self._data_dir, "mineru_outputs")
-        self._translated_dir = os.path.join(self._data_dir, "translated")
+        self._artifacts_dir = os.path.join(self._data_dir, "artifacts")
         self._chroma_dir = os.path.join(self._data_dir, "chroma")
 
         os.makedirs(self._pdf_dir, exist_ok=True)
-        os.makedirs(self._mineru_output_dir, exist_ok=True)
-        os.makedirs(self._translated_dir, exist_ok=True)
+        os.makedirs(self._artifacts_dir, exist_ok=True)
         os.makedirs(self._chroma_dir, exist_ok=True)
 
-        self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._mineru_output_dir)
+        self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._artifacts_dir)
         self._translate_service = ModelTranslator()
         
         # TODO: initialize markdown reconstructor service instance.
@@ -252,9 +250,7 @@ class PipelineOrchestrator:
                 on_progress(100.0, "翻譯完成")
 
             collection_stem = self._derive_collection_stem(json_path)
-            translated_json_path = (
-                Path(self._translated_dir) / f"{collection_stem}_translated.json"
-            )
+            translated_json_path = source_path.with_name(f"{collection_stem}_translated.json")
             with translated_json_path.open("w", encoding="utf-8") as output_file:
                 json.dump(
                     translated_items,
@@ -347,7 +343,7 @@ class PipelineOrchestrator:
         return QueryResponse(answer="", sources=[])
 
     def get_file_status(self, collection_name: str, method: str = "auto") -> FileStatusResponse:
-        parsed_dir = Path(self._mineru_output_dir) / collection_name / method
+        parsed_dir = Path(self._artifacts_dir) / collection_name / method
         parsed_indicators = [
             parsed_dir / f"{collection_name}_content_list_merged.json",
             parsed_dir / f"{collection_name}_content_list_v2.json",
@@ -355,10 +351,10 @@ class PipelineOrchestrator:
         ]
 
         translated_candidates = [
-            Path(self._translated_dir) / f"{collection_name}_translated.md",
-            Path(self._translated_dir) / f"{collection_name}_translated.json",
-            Path(self._translated_dir) / f"{collection_name}.md",
-            Path(self._translated_dir) / f"{collection_name}.json",
+            parsed_dir / f"{collection_name}_translated.md",
+            parsed_dir / f"{collection_name}_translated.json",
+            parsed_dir / f"{collection_name}.md",
+            parsed_dir / f"{collection_name}.json",
         ]
 
         translated_path: str | None = None
@@ -397,12 +393,7 @@ class PipelineOrchestrator:
     def delete_file(self, collection_name: str) -> DeleteResponse:
         target_paths = [
             Path(self._pdf_dir) / f"{collection_name}.pdf",
-            Path(self._mineru_output_dir) / collection_name,
-            Path(self._translated_dir) / f"{collection_name}_translated.md",
-            Path(self._translated_dir) / f"{collection_name}_translated.json",
-            Path(self._translated_dir) / f"{collection_name}.md",
-            Path(self._translated_dir) / f"{collection_name}.json",
-            Path(self._translated_dir) / collection_name,
+            Path(self._artifacts_dir) / collection_name,
         ]
 
         deleted_any = False
@@ -436,7 +427,3 @@ class PipelineOrchestrator:
             success=True,
             message=f"No artifacts found for collection: {collection_name}",
         )
-
-
-def create_orchestrator(data_dir: str) -> PipelineOrchestrator:
-    return PipelineOrchestrator(data_dir=data_dir)
