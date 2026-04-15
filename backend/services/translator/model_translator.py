@@ -5,9 +5,12 @@ from __future__ import annotations
 import gc
 import logging
 from pathlib import Path
+import re
 from typing import Any
 from typing import Mapping
 from typing import Sequence
+
+from services.translator import translator_config as cfg
 
 try:
     from huggingface_hub import hf_hub_download
@@ -21,78 +24,12 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-CONTEXT_PREVIEW_CHARS = 180
-MAX_EMPTY_OUTPUT_ATTEMPTS = 3
 
-HF_REPO_ID = "bartowski/Qwen2.5-7B-Instruct-GGUF"
-HF_FILENAME = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[3] / "models"
-
-TRANSLATION_SYSTEM_PROMPT = (
-    "You are a professional translation engine. "
-    "Always translate the source text to the target language exactly and faithfully. "
-    "Translate every sentence and every line; do not leave translatable text in the source language. "
-    "Output translation only, with no explanation, no notes, no markdown fences, and no extra lines. "
-    "Preserve original meaning, tone, and formatting (line breaks, numbering, bullet structure). "
-    "Do not omit, summarize, or add information. Keep URLs, emails, and code tokens unchanged unless translation is required. "
-    "Preserve person names in original Latin spelling; do not transliterate person names into Chinese. "
-    "When target language is Traditional Chinese, use zh-TW style and never output Simplified Chinese characters."
-)
-
-TRANSLATION_DECISION_RULES = (
-    "Hard constraints (must follow):\n"
-    "1) Translate all normal narrative words and grammar into the target language.\n"
-    "2) NEVER translate or transliterate person names. Keep person names exactly as original Latin text (same spelling and case).\n"
-    "3) Keep unchanged: URLs, emails, API/file paths, code identifiers, versions, and numeric values with units.\n"
-    "4) Keep acronyms unchanged: MEC, NFV, SFC, DRL, A3C, QIP, NP-hard.\n"
-    "5) For mixed lines, translate narrative parts only and preserve technical tokens exactly.\n"
-    "6) Person-name detection heuristic: treat a span as person name if it is two or more Latin words in Title Case (e.g., Lei Wang), possibly separated by commas/and in author lists.\n"
-    "7) For zh-TW output, use Traditional Chinese only; any Simplified Chinese characters are invalid output."
-)
-
-TRANSLATION_FEW_SHOT = (
-    "Few-shot examples:\n"
-    "[Example 1]\n"
-    "Source: Dongliang Zhang, Lei Wang and Amin Rezaeipanah.\n"
-    "Target: Dongliang Zhang、Lei Wang 和 Amin Rezaeipanah。\n"
-    "[Example 2]\n"
-    "Source: The evaluation results of proposed strategy are promising in different scenarios compared to benchmark algorithms.\n"
-    "Target: 與基準演算法相比，所提策略在不同情境下的評估結果展現出良好前景。\n"
-    "[Example 3]\n"
-    "Source: We apply Asynchronous Advantage Actor-Critic (A3C) as a deep reinforcement learning algorithm to assemble sub-SFCs.\n"
-    "Target: 我們採用非同步優勢行動者-評論家（A3C）作為深度強化學習演算法，以組裝子服務功能鏈（sub-SFCs）。\n"
-    "[Example 4]\n"
-    "Source: We finally evaluate the performance of LVPRU through trace-driven simulations.\n"
-    "Target: 我們最終透過追蹤驅動模擬評估 LVPRU 的效能。\n"
-    "[Example 5]\n"
-    "Source: Index Terms—MCE, NFV, SFC, DRL, network function parallelization, resource demand uncertainty.\n"
-    "Target: 關鍵詞—MCE、NFV、SFC、DRL、網路功能平行化、資源需求不確定性。"
-)
-
-LANG_MAP: dict[str, tuple[str, str]] = {
-    "en": ("English", "en"),
-    "chinese_cht": ("Traditional Chinese", "zh-TW"),
-    "ch": ("Simplified Chinese", "zh-CN"),
-    "korean": ("Korean", "ko"),
-    "japan": ("Japanese", "ja"),
-    "ta": ("Tamil", "ta"),
-    "te": ("Telugu", "te"),
-    "ka": ("Georgian", "ka"),
-    "th": ("Thai", "th"),
-    "el": ("Greek", "el"),
-    "latin": ("Latin", "la"),
-    "arabic": ("Arabic", "ar"),
-    "east_slavic": ("Russian", "ru"),
-    "cyrillic": ("Bulgarian", "bg"),
-    "devanagari": ("Hindi", "hi"),
-}
-
-
-def ensure_model_downloaded(model_dir: Path = DEFAULT_MODEL_DIR) -> Path:
+def ensure_model_downloaded(model_dir: Path = cfg.DEFAULT_MODEL_DIR) -> Path:
     """Ensure target GGUF model file exists in local models directory."""
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    model_path = model_dir / HF_FILENAME
+    model_path = model_dir / cfg.HF_FILENAME
     if model_path.exists():
         return model_path
 
@@ -103,8 +40,8 @@ def ensure_model_downloaded(model_dir: Path = DEFAULT_MODEL_DIR) -> Path:
 
     logger.info("模型不存在，開始從 HuggingFace 下載: %s", model_path)
     hf_hub_download(
-        repo_id=HF_REPO_ID,
-        filename=HF_FILENAME,
+        repo_id=cfg.HF_REPO_ID,
+        filename=cfg.HF_FILENAME,
         local_dir=str(model_dir),
     )
 
@@ -119,12 +56,16 @@ class TranslationGenerationError(RuntimeError):
     """Raised when model output stays empty for non-empty source text."""
 
 
+class TranslationPlaceholderError(RuntimeError):
+    """Raised when placeholder integrity checks fail after all recovery attempts."""
+
+
 class ModelTranslator:
     """Single-paragraph translator backed by a local GGUF model."""
 
     def __init__(
         self,
-        model_dir: Path = DEFAULT_MODEL_DIR,
+        model_dir: Path = cfg.DEFAULT_MODEL_DIR,
         n_gpu_layers: int = -1,
         n_ctx: int = 4096,
         verbose: bool = False,
@@ -136,7 +77,7 @@ class ModelTranslator:
 
         self._llm: Any | None = None
         # Model file verification/download is deferred until actual load.
-        self.model_path = self.model_dir / HF_FILENAME
+        self.model_path = self.model_dir / cfg.HF_FILENAME
 
     def __enter__(self) -> "ModelTranslator":
         self._load()
@@ -197,20 +138,28 @@ class ModelTranslator:
             return str(first.get("text", "")).strip()
         return ""
 
-    def _generate_translation(self, user_prompt: str) -> str:
+    def _generate_translation(
+        self,
+        user_prompt: str,
+        extra_system_rules: str = "",
+    ) -> str:
         if self._llm is None:
             raise RuntimeError("ModelTranslator 尚未載入模型，請在 with 區塊內呼叫")
+
+        system_content = (
+            f"{cfg.TRANSLATION_SYSTEM_PROMPT}\n\n"
+            f"{cfg.TRANSLATION_DECISION_RULES}\n\n"
+            f"{cfg.TRANSLATION_FEW_SHOT}"
+        )
+        if extra_system_rules.strip():
+            system_content = f"{system_content}\n\n{extra_system_rules.strip()}"
 
         if hasattr(self._llm, "create_chat_completion"):
             response = self._llm.create_chat_completion(
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            f"{TRANSLATION_SYSTEM_PROMPT}\n\n"
-                            f"{TRANSLATION_DECISION_RULES}\n\n"
-                            f"{TRANSLATION_FEW_SHOT}"
-                        ),
+                        "content": system_content,
                     },
                     {"role": "user", "content": user_prompt},
                 ],
@@ -220,9 +169,7 @@ class ModelTranslator:
         else:
             response = self._llm(
                 (
-                    f"[System]\n{TRANSLATION_SYSTEM_PROMPT}\n\n"
-                    f"{TRANSLATION_DECISION_RULES}\n\n"
-                    f"{TRANSLATION_FEW_SHOT}\n\n"
+                    f"[System]\n{system_content}\n\n"
                     f"[User]\n{user_prompt}"
                 ),
                 max_tokens=512,
@@ -238,16 +185,20 @@ class ModelTranslator:
         src_lang: str,
         tgt_lang: str,
         source_text: str,
+        extra_system_rules: str = "",
     ) -> str:
-        for attempt in range(1, MAX_EMPTY_OUTPUT_ATTEMPTS + 1):
-            result = self._generate_translation(user_prompt).strip()
+        for attempt in range(1, cfg.MAX_EMPTY_OUTPUT_ATTEMPTS + 1):
+            result = self._generate_translation(
+                user_prompt,
+                extra_system_rules=extra_system_rules,
+            ).strip()
             if result:
                 return result
 
             logger.warning(
                 "翻譯輸出為空，重試中 (%s/%s, src=%s, tgt=%s)",
                 attempt,
-                MAX_EMPTY_OUTPUT_ATTEMPTS,
+                cfg.MAX_EMPTY_OUTPUT_ATTEMPTS,
                 src_lang,
                 tgt_lang,
             )
@@ -263,6 +214,150 @@ class ModelTranslator:
         if len(parts) <= 1:
             return text
         return " ".join(parts)
+
+    @staticmethod
+    def _mask_math_segments(text: str) -> tuple[str, list[tuple[str, str]]]:
+        placeholders: list[tuple[str, str]] = []
+        next_index = 1
+
+        def _allocate_placeholder(segment: str) -> str:
+            nonlocal next_index
+            placeholder = cfg.MATH_PLACEHOLDER_PREFIX.format(index=next_index)
+            next_index += 1
+            placeholders.append((placeholder, segment))
+            return placeholder
+
+        def _replace_math(match: re.Match[str]) -> str:
+            return _allocate_placeholder(match.group(0))
+
+        masked = cfg.MATH_SEGMENT_PATTERN.sub(_replace_math, text)
+        return masked, placeholders
+
+    @staticmethod
+    def _restore_math_segments(
+        text: str,
+        placeholders: Sequence[tuple[str, str]],
+    ) -> str:
+        restored = text
+        for placeholder, segment in placeholders:
+            restored = restored.replace(placeholder, segment)
+        return restored
+
+    @staticmethod
+    def _extract_placeholder_sequence(text: str) -> list[str]:
+        return cfg.PLACEHOLDER_PATTERN.findall(text)
+
+    @classmethod
+    def _extract_placeholder_order(cls, text: str) -> list[str]:
+        seen: set[str] = set()
+        order: list[str] = []
+        for token in cls._extract_placeholder_sequence(text):
+            if token not in seen:
+                seen.add(token)
+                order.append(token)
+        return order
+
+    @classmethod
+    def _validate_placeholder_integrity(
+        cls,
+        source_text: str,
+        translated_text: str,
+    ) -> tuple[bool, str]:
+        source_sequence = cls._extract_placeholder_sequence(source_text)
+        if not source_sequence:
+            return True, ""
+
+        translated_sequence = cls._extract_placeholder_sequence(translated_text)
+        source_set = set(source_sequence)
+        translated_set = set(translated_sequence)
+        if source_set != translated_set:
+            return False, "set_mismatch"
+
+        source_order = cls._extract_placeholder_order(source_text)
+        translated_order = cls._extract_placeholder_order(translated_text)
+        if source_order != translated_order:
+            return False, "order_mismatch"
+
+        return True, ""
+
+    @staticmethod
+    def _iter_masked_segments(masked_text: str) -> list[tuple[bool, str]]:
+        """Split masked text into (is_placeholder, segment) tuples."""
+        segments: list[tuple[bool, str]] = []
+        cursor = 0
+        for match in cfg.PLACEHOLDER_PATTERN.finditer(masked_text):
+            if match.start() > cursor:
+                segments.append((False, masked_text[cursor:match.start()]))
+            segments.append((True, match.group(0)))
+            cursor = match.end()
+
+        if cursor < len(masked_text):
+            segments.append((False, masked_text[cursor:]))
+
+        return segments
+
+    @staticmethod
+    def _build_translation_user_prompt(
+        src_display: str,
+        tgt_display: str,
+        context_block: str,
+        source_text: str,
+    ) -> str:
+        return (
+            f"Translate the following text from {src_display} to {tgt_display}.\n"
+            f"{context_block}"
+            "Return only the translated text in the target language.\n"
+            "Translate all natural language words. Keep only URLs, emails, code tokens, and file/API paths unchanged.\n"
+            "<SOURCE_TEXT>\n"
+            f"{source_text}\n"
+            "</SOURCE_TEXT>"
+        )
+
+    def _translate_with_segment_fallback(
+        self,
+        masked_text: str,
+        src_lang: str,
+        tgt_lang: str,
+        src_display: str,
+        tgt_display: str,
+        context_block: str,
+    ) -> str:
+        translated_parts: list[str] = []
+
+        for is_placeholder, segment in self._iter_masked_segments(masked_text):
+            if is_placeholder or segment == "":
+                translated_parts.append(segment)
+                continue
+
+            leading_ws_len = len(segment) - len(segment.lstrip())
+            trailing_ws_len = len(segment) - len(segment.rstrip())
+            leading_ws = segment[:leading_ws_len]
+            trailing_ws = segment[len(segment) - trailing_ws_len :] if trailing_ws_len else ""
+
+            core_start = leading_ws_len
+            core_end = len(segment) - trailing_ws_len if trailing_ws_len else len(segment)
+            core_text = segment[core_start:core_end]
+
+            if core_text == "":
+                translated_parts.append(segment)
+                continue
+
+            segment_prompt = self._build_translation_user_prompt(
+                src_display,
+                tgt_display,
+                context_block,
+                core_text,
+            )
+            translated_core = self._generate_translation_with_retry(
+                segment_prompt,
+                src_lang,
+                tgt_lang,
+                core_text,
+            )
+
+            translated_parts.append(f"{leading_ws}{translated_core}{trailing_ws}")
+
+        return "".join(translated_parts)
 
     @staticmethod
     def _normalize_history_pairs(
@@ -316,8 +411,8 @@ class ModelTranslator:
             "Previous translation context (most recent last, for terminology consistency only):"
         ]
         for index, (src_text, tgt_text) in enumerate(context_pairs, start=1):
-            src_preview = src_text.strip().replace("\n", " ")[:CONTEXT_PREVIEW_CHARS]
-            tgt_preview = tgt_text.strip().replace("\n", " ")[:CONTEXT_PREVIEW_CHARS]
+            src_preview = src_text.strip().replace("\n", " ")[: cfg.CONTEXT_PREVIEW_CHARS]
+            tgt_preview = tgt_text.strip().replace("\n", " ")[: cfg.CONTEXT_PREVIEW_CHARS]
             context_lines.append(f"[Context {index} Source] {src_preview}")
             context_lines.append(f"[Context {index} Target] {tgt_preview}")
         return "\n".join(context_lines) + "\n\n"
@@ -332,30 +427,79 @@ class ModelTranslator:
         if self._llm is None:
             raise RuntimeError("ModelTranslator 尚未載入模型，請在 with 區塊內呼叫")
 
-        if src_lang not in LANG_MAP or tgt_lang not in LANG_MAP:
+        if src_lang not in cfg.LANG_MAP or tgt_lang not in cfg.LANG_MAP:
             raise ValueError(f"不支援的語言代碼: {src_lang} / {tgt_lang}")
 
         if text.strip() == "":
             return ""
 
-        src_display, _src_iso = LANG_MAP[src_lang]
-        tgt_display, _tgt_iso = LANG_MAP[tgt_lang]
+        src_display, _src_iso = cfg.LANG_MAP[src_lang]
+        tgt_display, _tgt_iso = cfg.LANG_MAP[tgt_lang]
         context_block = self._build_context_block(history)
-        source_text = self._flatten_multiline_text(text)
-        user_prompt = (
-            f"Translate the following text from {src_display} to {tgt_display}.\n"
-            f"{context_block}"
-            "Return only the translated text in the target language.\n"
-            "Translate all natural language words. Keep only URLs, emails, code tokens, and file/API paths unchanged.\n"
-            "<SOURCE_TEXT>\n"
-            f"{source_text}\n"
-            "</SOURCE_TEXT>"
+        source_text_masked_raw, math_placeholders = self._mask_math_segments(text)
+        source_text_masked = self._flatten_multiline_text(source_text_masked_raw)
+        user_prompt = self._build_translation_user_prompt(
+            src_display,
+            tgt_display,
+            context_block,
+            source_text_masked,
         )
-        result = self._generate_translation_with_retry(
+        result_masked = self._generate_translation_with_retry(
             user_prompt,
             src_lang,
             tgt_lang,
-            source_text,
+            source_text_masked,
         )
+
+        integrity_ok, integrity_reason = self._validate_placeholder_integrity(
+            source_text_masked,
+            result_masked,
+        )
+        if not integrity_ok:
+            logger.warning(
+                "翻譯結果占位符驗證失敗，啟用強化規則重試 (reason=%s, src=%s, tgt=%s)",
+                integrity_reason,
+                src_lang,
+                tgt_lang,
+            )
+            result_masked = self._generate_translation_with_retry(
+                user_prompt,
+                src_lang,
+                tgt_lang,
+                source_text_masked,
+                extra_system_rules=cfg.PLACEHOLDER_REPAIR_SYSTEM_RULES,
+            )
+
+            integrity_ok, integrity_reason = self._validate_placeholder_integrity(
+                source_text_masked,
+                result_masked,
+            )
+            if not integrity_ok:
+                logger.warning(
+                    "強化規則重試後仍失敗，啟用分段翻譯回退 (reason=%s, src=%s, tgt=%s)",
+                    integrity_reason,
+                    src_lang,
+                    tgt_lang,
+                )
+                result_masked = self._translate_with_segment_fallback(
+                    source_text_masked_raw,
+                    src_lang,
+                    tgt_lang,
+                    src_display,
+                    tgt_display,
+                    context_block,
+                )
+                integrity_ok, integrity_reason = self._validate_placeholder_integrity(
+                    source_text_masked_raw,
+                    result_masked,
+                )
+                if not integrity_ok:
+                    raise TranslationPlaceholderError(
+                        "翻譯輸出中的公式占位符驗證失敗"
+                        "，且分段翻譯回退後仍無法保證安全還原"
+                        f" (reason={integrity_reason}, src={src_lang}, tgt={tgt_lang})"
+                    )
+
+        result = self._restore_math_segments(result_masked, math_placeholders)
 
         return result

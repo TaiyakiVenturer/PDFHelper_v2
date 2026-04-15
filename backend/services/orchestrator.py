@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -19,7 +20,11 @@ from schemas.response import TranslateResultMessage
 from services.error_utils import classify_error_message
 from services.parser import content_merger
 from services.parser.mineru import MinerUCLIWrapper
+from services.reconstructor import MarkdownReconstructor
 from services.translator.model_translator import ModelTranslator
+
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineOrchestrator:
@@ -40,9 +45,8 @@ class PipelineOrchestrator:
 
         self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._artifacts_dir)
         self._translate_service = ModelTranslator()
+        self._md_reconstructor = MarkdownReconstructor()
         
-        # TODO: initialize markdown reconstructor service instance.
-        self._md_reconstructor = None
         # TODO: initialize ChromaDB indexer/retrieval service instance.
         self._chroma_service = None
 
@@ -126,9 +130,18 @@ class PipelineOrchestrator:
                     indent=2,
                 )
 
-            # TODO: call md_reconstructor.reconstruct(merged_json_path, mode="origin").
-            # Expected input: merged_json_path and "origin" mode.
-            # Expected output: absolute path to original markdown file.
+            markdown_path: str | None = None
+            try:
+                markdown_path = self._md_reconstructor.reconstruct(
+                    merged_json_path,
+                    use_translated=False,
+                )
+            except Exception as reconstruct_error:
+                logger.warning(
+                    "Markdown reconstruction failed for merged json %s: %s",
+                    merged_json_path,
+                    reconstruct_error,
+                )
 
             image_dir: str | None = None
             if process_result.output_file_paths.image_path:
@@ -138,7 +151,7 @@ class PipelineOrchestrator:
 
             return ParseResultMessage(
                 success=True,
-                markdown_path=None,
+                markdown_path=markdown_path,
                 json_path=merged_json_path,
                 image_dir=image_dir,
                 processing_time=time.time() - start_time,
@@ -259,11 +272,18 @@ class PipelineOrchestrator:
                     indent=2,
                 )
 
-            # TODO: call md_reconstructor.reconstruct(translated_json_path, mode="translated").
-            # Expected input: translated JSON path and "translated" mode.
-            # Expected output: absolute path to translated markdown file.
-
-            translated_path = str(translated_json_path.resolve())
+            translated_path: str | None = None
+            try:
+                translated_path = self._md_reconstructor.reconstruct(
+                    str(translated_json_path.resolve()),
+                    use_translated=True,
+                )
+            except Exception as reconstruct_error:
+                logger.warning(
+                    "Markdown reconstruction failed for translated json %s: %s",
+                    translated_json_path,
+                    reconstruct_error,
+                )
 
             return TranslateResultMessage(
                 success=True,
@@ -348,13 +368,12 @@ class PipelineOrchestrator:
             parsed_dir / f"{collection_name}_content_list_merged.json",
             parsed_dir / f"{collection_name}_content_list_v2.json",
             parsed_dir / f"{collection_name}_content_list.json",
+            parsed_dir / f"{collection_name}.md",
         ]
 
         translated_candidates = [
-            parsed_dir / f"{collection_name}_translated.md",
             parsed_dir / f"{collection_name}_translated.json",
-            parsed_dir / f"{collection_name}.md",
-            parsed_dir / f"{collection_name}.json",
+            parsed_dir / f"{collection_name}_translated.md",
         ]
 
         translated_path: str | None = None
