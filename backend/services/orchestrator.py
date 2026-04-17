@@ -362,6 +362,55 @@ class PipelineOrchestrator:
         # Expected output: answer string.
         return QueryResponse(answer="", sources=[])
 
+    def list_files(self) -> list[dict[str, str]]:
+        pdf_dir = Path(self._pdf_dir)
+        allowed_suffixes = {".pdf"}
+
+        files = [
+            {
+                "name": entry.name,
+                "path": str(entry.resolve()),
+            }
+            for entry in pdf_dir.iterdir()
+            if entry.is_file() and entry.suffix.lower() in allowed_suffixes
+        ]
+
+        return sorted(files, key=lambda item: item["name"].lower())
+
+    def upload_file(self, source_path: str) -> dict[str, str]:
+        source = Path(source_path)
+        if not source.is_absolute():
+            raise ValueError("source_path must be an absolute path")
+
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"Source file not found: {source_path}")
+
+        allowed_suffixes = {".pdf"}
+        if source.suffix.lower() not in allowed_suffixes:
+            raise ValueError("Only PDF files are supported")
+
+        destination = Path(self._pdf_dir) / source.name
+        if destination.exists():
+            raise FileExistsError(f"Target file already exists: {source.name}")
+
+        shutil.copy2(source, destination)
+
+        return {
+            "name": destination.name,
+            "path": str(destination.resolve()),
+        }
+
+    def delete_file(self, filename: str) -> DeleteResponse:
+        if "/" in filename or "\\" in filename:
+            raise ValueError("filename must not contain path separators")
+
+        target_path = Path(self._pdf_dir) / filename
+        if not target_path.exists() or not target_path.is_file():
+            raise FileNotFoundError(f"Original file not found: {filename}")
+
+        target_path.unlink()
+        return DeleteResponse(success=True, message=f"Deleted {filename}")
+
     def get_file_status(self, collection_name: str, method: str = "auto") -> FileStatusResponse:
         parsed_dir = Path(self._artifacts_dir) / collection_name / method
         parsed_indicators = [
@@ -409,9 +458,8 @@ class PipelineOrchestrator:
 
         return FileStatusResponse(stage="none", translated_path=None, collection_name=None)
 
-    def delete_file(self, collection_name: str) -> DeleteResponse:
+    def delete_artifacts(self, collection_name: str) -> DeleteResponse:
         target_paths = [
-            Path(self._pdf_dir) / f"{collection_name}.pdf",
             Path(self._artifacts_dir) / collection_name,
         ]
 

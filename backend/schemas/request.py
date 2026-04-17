@@ -25,3 +25,7 @@ class QueryRequest(BaseModel):
     question: str
     collection_name: str
     top_k: int = Field(default=10, ge=1)
+
+
+class UploadFileRequest(BaseModel):
+    source_path: str

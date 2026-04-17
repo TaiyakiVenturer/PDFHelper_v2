@@ -88,3 +88,12 @@ class FileStatusResponse(BaseModel):
 class DeleteResponse(BaseModel):
     success: bool
     message: str
+
+
+class FileItem(BaseModel):
+    name: str
+    path: str
+
+
+class FileListResponse(BaseModel):
+    files: list[FileItem] = Field(default_factory=list)
