@@ -455,51 +455,53 @@ class ModelTranslator:
             source_text_masked,
             result_masked,
         )
-        if not integrity_ok:
-            logger.warning(
-                "翻譯結果占位符驗證失敗，啟用強化規則重試 (reason=%s, src=%s, tgt=%s)",
-                integrity_reason,
-                src_lang,
-                tgt_lang,
-            )
-            result_masked = self._generate_translation_with_retry(
-                user_prompt,
-                src_lang,
-                tgt_lang,
-                source_text_masked,
-                extra_system_rules=cfg.PLACEHOLDER_REPAIR_SYSTEM_RULES,
-            )
+        if integrity_ok:
+            return self._restore_math_segments(result_masked, math_placeholders)
 
-            integrity_ok, integrity_reason = self._validate_placeholder_integrity(
-                source_text_masked,
-                result_masked,
-            )
-            if not integrity_ok:
-                logger.warning(
-                    "強化規則重試後仍失敗，啟用分段翻譯回退 (reason=%s, src=%s, tgt=%s)",
-                    integrity_reason,
-                    src_lang,
-                    tgt_lang,
-                )
-                result_masked = self._translate_with_segment_fallback(
-                    source_text_masked_raw,
-                    src_lang,
-                    tgt_lang,
-                    src_display,
-                    tgt_display,
-                    context_block,
-                )
-                integrity_ok, integrity_reason = self._validate_placeholder_integrity(
-                    source_text_masked_raw,
-                    result_masked,
-                )
-                if not integrity_ok:
-                    raise TranslationPlaceholderError(
-                        "翻譯輸出中的公式占位符驗證失敗"
-                        "，且分段翻譯回退後仍無法保證安全還原"
-                        f" (reason={integrity_reason}, src={src_lang}, tgt={tgt_lang})"
-                    )
+        logger.warning(
+            "翻譯結果占位符驗證失敗，啟用強化規則重試 (reason=%s, src=%s, tgt=%s)",
+            integrity_reason,
+            src_lang,
+            tgt_lang,
+        )
+        result_masked = self._generate_translation_with_retry(
+            user_prompt,
+            src_lang,
+            tgt_lang,
+            source_text_masked,
+            extra_system_rules=cfg.PLACEHOLDER_REPAIR_SYSTEM_RULES,
+        )
 
-        result = self._restore_math_segments(result_masked, math_placeholders)
+        integrity_ok, integrity_reason = self._validate_placeholder_integrity(
+            source_text_masked,
+            result_masked,
+        )
+        if integrity_ok:
+            return self._restore_math_segments(result_masked, math_placeholders)
 
-        return result
+        logger.warning(
+            "強化規則重試後仍失敗，啟用分段翻譯回退 (reason=%s, src=%s, tgt=%s)",
+            integrity_reason,
+            src_lang,
+            tgt_lang,
+        )
+        result_masked = self._translate_with_segment_fallback(
+            source_text_masked_raw,
+            src_lang,
+            tgt_lang,
+            src_display,
+            tgt_display,
+            context_block,
+        )
+        integrity_ok, integrity_reason = self._validate_placeholder_integrity(
+            source_text_masked_raw,
+            result_masked,
+        )
+        if integrity_ok:
+            return self._restore_math_segments(result_masked, math_placeholders)
+
+        raise TranslationPlaceholderError(
+            "翻譯輸出中的公式占位符驗證失敗"
+            "，且分段翻譯回退後仍無法保證安全還原"
+            f" (reason={integrity_reason}, src={src_lang}, tgt={tgt_lang})"
+        )

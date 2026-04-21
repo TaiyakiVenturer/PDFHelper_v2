@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import asdict
 import json
 import logging
@@ -18,9 +17,12 @@ from schemas.response import ParseResultMessage
 from schemas.response import QueryResponse
 from schemas.response import TranslateResultMessage
 from services.error_utils import classify_error_message
+from services.indexer.chroma_service import ChromaService
+from services.indexer.chunker import StructureAwareChunker
+from services.indexer.embedder import BgeM3Embedder
 from services.parser import content_merger
 from services.parser.mineru import MinerUCLIWrapper
-from services.reconstructor import MarkdownReconstructor
+from services.reconstructor.md_reconstructor import MarkdownReconstructor
 from services.translator.model_translator import ModelTranslator
 
 
@@ -28,6 +30,19 @@ logger = logging.getLogger(__name__)
 
 
 class PipelineOrchestrator:
+    @staticmethod
+    def _noop_progress(_percent: float, _message: str) -> None:
+        return None
+
+    @classmethod
+    def _resolve_progress_callback(
+        cls,
+        on_progress: Callable[[float, str], None] | None,
+    ) -> Callable[[float, str], None]:
+        if on_progress is not None:
+            return on_progress
+        return cls._noop_progress
+
     def __init__(self, data_dir: str) -> None:
         if not os.path.isabs(data_dir):
             raise ValueError("data_dir must be an absolute path")
@@ -46,14 +61,16 @@ class PipelineOrchestrator:
         self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._artifacts_dir)
         self._translate_service = ModelTranslator()
         self._md_reconstructor = MarkdownReconstructor()
+        self._embedder = BgeM3Embedder()
+        self._chroma_service = ChromaService(persist_dir=self._chroma_dir)
         
-        # TODO: initialize ChromaDB indexer/retrieval service instance.
-        self._chroma_service = None
+        self._busy_stage: str | None = None
 
     @staticmethod
     def _derive_collection_stem(json_path: str) -> str:
         stem = Path(json_path).stem
         for suffix in (
+            "_translated",
             "_content_list_merged",
             "_content_list_v2",
             "_content_list",
@@ -61,6 +78,81 @@ class PipelineOrchestrator:
             if stem.endswith(suffix):
                 return stem.removesuffix(suffix)
         return stem
+
+    def _acquire_stage(self, stage_name: str) -> str | None:
+        if self._busy_stage is not None:
+            return f"Another stage is busy: {self._busy_stage}"
+        self._busy_stage = stage_name
+        return None
+
+    def _release_stage(self) -> None:
+        self._busy_stage = None
+
+    @staticmethod
+    def _normalize_optional_str(raw: object) -> str | None:
+        if raw is None:
+            return None
+        value = str(raw)
+        return value if value != "" else None
+
+    @staticmethod
+    def _normalize_optional_int(raw: object) -> int | None:
+        try:
+            if raw is None:
+                return None
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_int(raw: object, default: int = 0) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _normalize_string_list(raw: object) -> list[str] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            return None
+        normalized = [str(item) for item in raw]
+        return normalized or None
+
+    @classmethod
+    def _normalize_bbox(cls, raw: object) -> list[int]:
+        if not isinstance(raw, list):
+            return []
+
+        bbox: list[int] = []
+        for value in raw:
+            try:
+                bbox.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return bbox
+
+    @classmethod
+    def _build_mineru_item(cls, raw_item: dict[str, object]) -> content_merger.MinerUItem:
+        return content_merger.MinerUItem(
+            type_v1=str(raw_item.get("type_v1", "unknown") or "unknown"),
+            type_v2=str(raw_item.get("type_v2", "unknown") or "unknown"),
+            text=str(raw_item.get("text", "") or ""),
+            translated_text=cls._normalize_optional_str(raw_item.get("translated_text")),
+            list_items=cls._normalize_string_list(raw_item.get("list_items")),
+            sub_type=cls._normalize_optional_str(raw_item.get("sub_type")),
+            text_level=cls._normalize_optional_int(raw_item.get("text_level")),
+            bbox=cls._normalize_bbox(raw_item.get("bbox")),
+            page_idx=cls._normalize_int(raw_item.get("page_idx"), default=0),
+            img_path=cls._normalize_optional_str(raw_item.get("img_path")),
+            table_html=cls._normalize_optional_str(raw_item.get("table_html")),
+            math_latex=cls._normalize_optional_str(raw_item.get("math_latex")),
+            code_body=cls._normalize_optional_str(raw_item.get("code_body")),
+            footnote=cls._normalize_string_list(raw_item.get("footnote")),
+            title_level=cls._normalize_optional_int(raw_item.get("title_level")),
+            caption=cls._normalize_string_list(raw_item.get("caption")),
+        )
 
     def run_parse(
         self,
@@ -71,32 +163,43 @@ class PipelineOrchestrator:
         table: bool,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> ParseResultMessage:
+        progress_callback = self._resolve_progress_callback(on_progress)
         start_time = time.time()
-
-        process_result = self._mineru_wrapper.process(
-            pdf_path=pdf_path,
-            method=method,
-            lang=lang,
-            formula=formula,
-            table=table,
-            on_progress=on_progress,
-        )
-
-        if not process_result.success:
-            error_code, error_category, retryable = classify_error_message(
-                "parse",
-                process_result.error,
-            )
+        busy_msg = self._acquire_stage("parse")
+        if busy_msg is not None:
             return ParseResultMessage(
                 success=False,
-                processing_time=time.time() - start_time,
-                error=process_result.error,
-                error_code=error_code,
-                error_category=error_category,
-                retryable=retryable,
+                processing_time=0.0,
+                error=busy_msg,
+                error_code="REQ_PARSE_STAGE_BUSY",
+                error_category=ErrorCategory.REQUEST,
+                retryable=True,
             )
 
         try:
+            process_result = self._mineru_wrapper.process(
+                pdf_path=pdf_path,
+                method=method,
+                lang=lang,
+                formula=formula,
+                table=table,
+                on_progress=progress_callback,
+            )
+
+            if not process_result.success:
+                error_code, error_category, retryable = classify_error_message(
+                    "parse",
+                    process_result.error,
+                )
+                return ParseResultMessage(
+                    success=False,
+                    processing_time=time.time() - start_time,
+                    error=process_result.error,
+                    error_code=error_code,
+                    error_category=error_category,
+                    retryable=retryable,
+                )
+
             output_paths = process_result.output_file_paths
             if output_paths.json_v1_path is None or output_paths.json_v2_path is None:
                 missing_versions: list[str] = []
@@ -174,6 +277,8 @@ class PipelineOrchestrator:
                 error_category=error_category,
                 retryable=retryable,
             )
+        finally:
+            self._release_stage()
 
     def run_translate(
         self,
@@ -182,7 +287,19 @@ class PipelineOrchestrator:
         tgt_lang: str,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> TranslateResultMessage:
+        progress_callback = self._resolve_progress_callback(on_progress)
         start_time = time.time()
+        busy_msg = self._acquire_stage("translate")
+        if busy_msg is not None:
+            return TranslateResultMessage(
+                success=False,
+                processing_time=0.0,
+                error=busy_msg,
+                error_code="REQ_TRANSLATE_STAGE_BUSY",
+                error_category=ErrorCategory.REQUEST,
+                retryable=True,
+            )
+
         try:
             if not os.path.isabs(json_path):
                 return TranslateResultMessage(
@@ -222,7 +339,8 @@ class PipelineOrchestrator:
             translated_count = 0
             skipped_count = 0
             total_items = len(source_data)
-            translation_history: deque[dict[str, str]] = deque(maxlen=5)
+            history_slots: list[dict[str, str] | None] = [None] * 5
+            history_cursor = 0
 
             with self._translate_service as translator:
                 for index, item in enumerate(source_data):
@@ -236,31 +354,33 @@ class PipelineOrchestrator:
                             skipped_count += 1
                             translated_item["translated_text"] = ""
                         else:
+                            history_snapshot = [
+                                entry for entry in history_slots if entry is not None
+                            ]
                             translated_text = translator.translate_paragraph(
                                 text,
                                 src_lang,
                                 tgt_lang,
-                                history=list(translation_history),
+                                history=history_snapshot,
                             )
                             translated_item["translated_text"] = translated_text
                             if translated_text.strip() == "":
                                 skipped_count += 1
                             else:
                                 translated_count += 1
-                                translation_history.append(
-                                    {
-                                        "source_text": text,
-                                        "translated_text": translated_text,
-                                    }
-                                )
+                                history_slots[history_cursor] = {
+                                    "source_text": text,
+                                    "translated_text": translated_text,
+                                }
+                                history_cursor = (history_cursor + 1) % len(history_slots)
                         translated_items.append(translated_item)
 
-                    if on_progress is not None and total_items > 0:
+                    if total_items > 0:
                         progress = round(((index + 1) / total_items) * 100.0, 2)
-                        on_progress(progress, "翻譯中")
+                        progress_callback(progress, "翻譯中")
 
-            if on_progress is not None and total_items == 0:
-                on_progress(100.0, "翻譯完成")
+            if total_items == 0:
+                progress_callback(100.0, "翻譯完成")
 
             collection_stem = self._derive_collection_stem(json_path)
             translated_json_path = source_path.with_name(f"{collection_stem}_translated.json")
@@ -310,33 +430,111 @@ class PipelineOrchestrator:
                 error_category=error_category,
                 retryable=retryable,
             )
+        finally:
+            self._release_stage()
 
     def run_index(
         self,
         json_path: str,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> IndexResultMessage:
+        progress_callback = self._resolve_progress_callback(on_progress)
         start_time = time.time()
-        try:
-            # TODO: call chunker with structure-aware token chunking.
-            # Expected input: json_path, on_progress.
-            # Expected output: chunk list.
-
-            # TODO: call ChromaDB indexer with BAAI/bge-m3 embeddings.
-            # Expected input: chunk list.
-            # Expected output: collection_name and chunk_count.
-
-            if on_progress is not None:
-                on_progress(100.0, "索引流程尚未實作")
-
+        busy_msg = self._acquire_stage("index")
+        if busy_msg is not None:
             return IndexResultMessage(
                 success=False,
-                collection_name=None,
-                chunk_count=0,
+                processing_time=0.0,
+                error=busy_msg,
+                error_code="REQ_INDEX_STAGE_BUSY",
+                error_category=ErrorCategory.REQUEST,
+                retryable=True,
+            )
+
+        try:
+            if not os.path.isabs(json_path):
+                return IndexResultMessage(
+                    success=False,
+                    processing_time=time.time() - start_time,
+                    error="json_path must be an absolute path",
+                    error_code="INP_INDEX_ABSOLUTE_PATH_REQUIRED",
+                    error_category=ErrorCategory.INPUT,
+                    retryable=False,
+                )
+
+            source_path = Path(json_path)
+            if not source_path.exists():
+                return IndexResultMessage(
+                    success=False,
+                    processing_time=time.time() - start_time,
+                    error=f"Input json file not found: {json_path}",
+                    error_code="INP_INDEX_FILE_NOT_FOUND",
+                    error_category=ErrorCategory.INPUT,
+                    retryable=False,
+                )
+
+            with source_path.open("r", encoding="utf-8") as source_file:
+                source_data = json.load(source_file)
+
+            if not isinstance(source_data, list):
+                return IndexResultMessage(
+                    success=False,
+                    processing_time=time.time() - start_time,
+                    error="Input json must be a list of content items",
+                    error_code="INP_INDEX_INVALID_JSON_STRUCTURE",
+                    error_category=ErrorCategory.INPUT,
+                    retryable=False,
+                )
+
+            items: list[content_merger.MinerUItem] = []
+            for raw_item in source_data:
+                if not isinstance(raw_item, dict):
+                    continue
+                items.append(self._build_mineru_item(raw_item))
+
+            collection_name = self._derive_collection_stem(json_path)
+
+            progress_callback(5.0, "切分 chunk 中")
+
+            chunker = StructureAwareChunker()
+            chunks = chunker.chunk(items)
+
+            if len(chunks) == 0:
+                return IndexResultMessage(
+                    success=False,
+                    collection_name=None,
+                    chunk_count=0,
+                    processing_time=time.time() - start_time,
+                    error="No chunks generated from input content",
+                    error_code="PIPE_INDEX_NO_CHUNKS",
+                    error_category=ErrorCategory.PIPELINE,
+                    retryable=False,
+                )
+
+            progress_callback(15.0, "載入 embedding 模型")
+
+            self._embedder.load()
+
+            progress_callback(25.0, "計算 embedding")
+            embeddings = self._embedder.embed_texts(
+                [chunk.embedding_text for chunk in chunks]
+            )
+
+            progress_callback(85.0, "寫入 ChromaDB")
+
+            collection = self._chroma_service.create_collection(collection_name)
+            self._chroma_service.add_chunks(collection, chunks, embeddings)
+
+            progress_callback(100.0, "索引完成")
+
+            return IndexResultMessage(
+                success=True,
+                collection_name=collection_name,
+                chunk_count=len(chunks),
                 processing_time=time.time() - start_time,
-                error="Index pipeline is not implemented yet",
-                error_code="NIM_INDEX_NOT_IMPLEMENTED",
-                error_category=ErrorCategory.NOT_IMPLEMENTED,
+                error="",
+                error_code=None,
+                error_category=None,
                 retryable=False,
             )
         except Exception as error:
@@ -353,6 +551,8 @@ class PipelineOrchestrator:
                 error_category=error_category,
                 retryable=retryable,
             )
+        finally:
+            self._release_stage()
 
     def run_query(self, question: str, collection_name: str, top_k: int = 10) -> QueryResponse:
         # TODO: call ChromaDB retrieval.query(collection_name, question, top_k).
@@ -431,8 +631,16 @@ class PipelineOrchestrator:
                 translated_path = str(path.resolve())
                 break
 
-        collection_dir = Path(self._chroma_dir) / collection_name
-        has_indexed = collection_dir.exists() and any(collection_dir.iterdir())
+        has_indexed = False
+        try:
+            has_indexed = self._chroma_service.collection_exists(collection_name)
+        except Exception as error:
+            logger.warning(
+                "Failed to check collection status for %s: %s",
+                collection_name,
+                error,
+            )
+
         has_parsed = any(path.exists() for path in parsed_indicators)
 
         if has_indexed:
@@ -479,7 +687,12 @@ class PipelineOrchestrator:
             except OSError as error:
                 errors.append(f"{path}: {error}")
 
-        # TODO: call ChromaDB delete_collection(collection_name).
+        try:
+            deleted_collection = self._chroma_service.delete_collection(collection_name)
+            if deleted_collection:
+                deleted_any = True
+        except Exception as error:
+            errors.append(f"chroma collection {collection_name}: {error}")
 
         if errors:
             return DeleteResponse(success=False, message="; ".join(errors))

@@ -433,6 +433,3 @@ def load_and_merge(v1_path: str, v2_path: str) -> list[MinerUItem]:
         merged.append(_merge_item(item_v1, item_v2))
 
     return merged
-
-
-__all__ = ["MinerUItem", "load_and_merge"]

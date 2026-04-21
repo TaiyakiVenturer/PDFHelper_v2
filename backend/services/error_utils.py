@@ -33,6 +33,12 @@ def classify_error_message(stage: str, message: str) -> tuple[str, str, bool]:
     if "output" in normalized and "missing" in normalized:
         return f"PIPE_{stage.upper()}_OUTPUT_MISSING", "pipeline", False
 
+    if "no chunks" in normalized or "0 chunks" in normalized:
+        return f"PIPE_{stage.upper()}_NO_CHUNKS", "pipeline", False
+
+    if "stage is busy" in normalized or "another stage" in normalized:
+        return f"REQ_{stage.upper()}_STAGE_BUSY", "request", True
+
     return f"SYS_{stage.upper()}_UNEXPECTED", "system", False
 
 
