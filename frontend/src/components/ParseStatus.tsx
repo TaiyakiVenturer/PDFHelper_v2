@@ -1,3 +1,4 @@
+import { ProgressBar } from "./ProgressBar";
 import { useParseStore } from "../stores/useParseStore";
 
 export function ParseStatus() {
@@ -15,8 +16,7 @@ export function ParseStatus() {
     return (
       <section className="parse-status" aria-live="polite">
         <h2 className="panel-title">解析狀態</h2>
-        <p className="parse-main">解析中... {Math.round(percent)}%</p>
-        <p className="parse-sub">{message || "處理中"}</p>
+        <ProgressBar percent={percent} message={message || "處理中"} />
       </section>
     );
   }

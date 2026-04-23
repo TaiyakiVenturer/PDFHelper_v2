@@ -11,6 +11,7 @@ import {
 } from "../services/fileService";
 import { useParseStore } from "../stores/useParseStore";
 import { useToastStore } from "../stores/useToastStore";
+import { useTranslateStore } from "../stores/useTranslateStore";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 function getFilenameFromPath(path: string): string {
@@ -35,8 +36,16 @@ export function FileManager() {
   const addToast = useToastStore((state) => state.addToast);
   const parseStatus = useParseStore((state) => state.status);
   const startParse = useParseStore((state) => state.startParse);
+  const translateStatus = useTranslateStore((state) => state.status);
+  const startTranslate = useTranslateStore((state) => state.startTranslate);
+  const confirmOverwrite = useTranslateStore((state) => state.confirmOverwrite);
+  const cancelOverwrite = useTranslateStore((state) => state.cancelOverwrite);
 
   const isParsing = parseStatus === "parsing";
+  const isTranslating =
+    translateStatus === "checking" ||
+    translateStatus === "awaitingConfirm" ||
+    translateStatus === "translating";
 
   const clearPending = useCallback(() => {
     setPendingPath(null);
@@ -333,12 +342,22 @@ export function FileManager() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={isWorking || isParsing}
+                  disabled={isWorking || isParsing || isTranslating}
                   onClick={() => {
                     void startParse(file.path);
                   }}
                 >
-                  {isParsing ? "解析中..." : "開始解析"}
+                  {isParsing ? "解析中..." : "解析"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={isWorking || isParsing || isTranslating}
+                  onClick={() => {
+                    void startTranslate(file.name, file.path);
+                  }}
+                >
+                  {isTranslating ? "翻譯中..." : "翻譯"}
                 </button>
               </div>
             </div>
@@ -360,6 +379,16 @@ export function FileManager() {
         onConfirm={() => {
           void handleDeleteConfirm();
         }}
+      />
+
+      <ConfirmDialog
+        open={translateStatus === "awaitingConfirm"}
+        title="覆寫翻譯"
+        message="該檔案已有翻譯結果，重新翻譯將覆寫現有內容。確定要繼續嗎？"
+        confirmLabel="繼續覆寫"
+        cancelLabel="取消"
+        onCancel={cancelOverwrite}
+        onConfirm={confirmOverwrite}
       />
     </section>
   );

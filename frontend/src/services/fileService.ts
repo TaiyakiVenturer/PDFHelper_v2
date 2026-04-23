@@ -3,6 +3,14 @@ export interface PdfFileItem {
   path: string;
 }
 
+export type FileStage = "none" | "parsed" | "translated" | "indexed";
+
+export interface FileStatusResponse {
+  stage: FileStage;
+  translated_path: string | null;
+  collection_name: string | null;
+}
+
 interface FileListResponse {
   files: PdfFileItem[];
 }
@@ -27,6 +35,20 @@ export class FileServiceError extends Error {
 
 export function isFileServiceError(error: unknown): error is FileServiceError {
   return error instanceof FileServiceError;
+}
+
+export function deriveCollectionName(filename: string): string {
+  const trimmed = filename.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const dotIndex = trimmed.lastIndexOf(".");
+  if (dotIndex <= 0) {
+    return trimmed;
+  }
+
+  return trimmed.slice(0, dotIndex);
 }
 
 async function readErrorDetail(response: Response): Promise<string | null> {
@@ -171,6 +193,42 @@ export async function deletePdf(filename: string): Promise<void> {
   throw new FileServiceError(
     "SERVER",
     detail || `刪除失敗（HTTP ${response.status}）`,
+    response.status,
+  );
+}
+
+export async function getFileStatus(
+  collectionName: string,
+  method = "auto",
+): Promise<FileStatusResponse> {
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${API_BASE}/file/${encodeURIComponent(collectionName)}/status?method=${encodeURIComponent(method)}`,
+      { method: "GET" },
+    );
+  } catch (error) {
+    throw toNetworkError(error);
+  }
+
+  if (response.ok) {
+    return (await response.json()) as FileStatusResponse;
+  }
+
+  const detail = await readErrorDetail(response);
+
+  if (response.status === 404) {
+    throw new FileServiceError(
+      "NOT_FOUND",
+      detail || "找不到對應檔案狀態",
+      response.status,
+    );
+  }
+
+  throw new FileServiceError(
+    "SERVER",
+    detail || `讀取檔案狀態失敗（HTTP ${response.status}）`,
     response.status,
   );
 }

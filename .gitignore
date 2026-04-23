@@ -1,6 +1,9 @@
 # VSCode settings
 .vscode/
 
+# Claude Code Settings
+.claude/
+
 # User Data
 data/
 
