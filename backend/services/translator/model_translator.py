@@ -2,54 +2,16 @@
 
 from __future__ import annotations
 
-import gc
 import logging
-from pathlib import Path
 import re
 from typing import Any
 from typing import Mapping
 from typing import Sequence
 
+from services.llm.llama_factory import LlamaFactory
 from services.translator import translator_config as cfg
 
-try:
-    from huggingface_hub import hf_hub_download
-except ImportError:  # pragma: no cover
-    hf_hub_download = None
-
-try:
-    from llama_cpp import Llama
-except ImportError:  # pragma: no cover
-    Llama = None
-
 logger = logging.getLogger(__name__)
-
-
-def ensure_model_downloaded(model_dir: Path = cfg.DEFAULT_MODEL_DIR) -> Path:
-    """Ensure target GGUF model file exists in local models directory."""
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = model_dir / cfg.HF_FILENAME
-    if model_path.exists():
-        return model_path
-
-    if hf_hub_download is None:
-        raise RuntimeError(
-            "huggingface_hub 未安裝，無法自動下載模型。請先安裝 huggingface-hub。"
-        )
-
-    logger.info("模型不存在，開始從 HuggingFace 下載: %s", model_path)
-    hf_hub_download(
-        repo_id=cfg.HF_REPO_ID,
-        filename=cfg.HF_FILENAME,
-        local_dir=str(model_dir),
-    )
-
-    if not model_path.exists():
-        raise FileNotFoundError(f"模型下載完成後仍找不到檔案: {model_path}")
-
-    logger.info("模型下載完成: %s", model_path)
-    return model_path
 
 
 class TranslationGenerationError(RuntimeError):
@@ -63,24 +25,11 @@ class TranslationPlaceholderError(RuntimeError):
 class ModelTranslator:
     """Single-paragraph translator backed by a local GGUF model."""
 
-    def __init__(
-        self,
-        model_dir: Path = cfg.DEFAULT_MODEL_DIR,
-        n_gpu_layers: int = -1,
-        n_ctx: int = 4096,
-        verbose: bool = False,
-    ) -> None:
-        self.model_dir = Path(model_dir)
-        self.n_gpu_layers = n_gpu_layers
-        self.n_ctx = n_ctx
-        self.verbose = verbose
-
-        self._llm: Any | None = None
-        # Model file verification/download is deferred until actual load.
-        self.model_path = self.model_dir / cfg.HF_FILENAME
+    def __init__(self, llm_factory: LlamaFactory) -> None:
+        self._llm_factory = llm_factory
 
     def __enter__(self) -> "ModelTranslator":
-        self._load()
+        self._llm_factory.__enter__()
         return self
 
     def __exit__(
@@ -89,40 +38,7 @@ class ModelTranslator:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> bool:
-        try:
-            self._unload()
-        finally:
-            pass
-        return False
-
-    def _load(self) -> None:
-        if self._llm is not None:
-            logger.warning("模型已載入，跳過重複載入")
-            return
-
-        if Llama is None:
-            raise RuntimeError(
-                "llama-cpp-python 未安裝，無法載入模型。請先安裝 llama-cpp-python。"
-            )
-
-        self.model_path = ensure_model_downloaded(self.model_dir)
-        logger.info("正在載入翻譯模型: %s", self.model_path)
-        self._llm = Llama(
-            model_path=str(self.model_path),
-            n_gpu_layers=self.n_gpu_layers,
-            n_ctx=self.n_ctx,
-            verbose=self.verbose,
-        )
-        logger.info("翻譯模型載入完成")
-
-    def _unload(self) -> None:
-        if self._llm is None:
-            return
-
-        del self._llm
-        self._llm = None
-        gc.collect()
-        logger.info("模型已卸載，VRAM 已釋放")
+        return self._llm_factory.__exit__(exc_type, exc_val, exc_tb)
 
     @staticmethod
     def _extract_text_from_response(response: dict[str, Any]) -> str:
@@ -143,7 +59,7 @@ class ModelTranslator:
         user_prompt: str,
         extra_system_rules: str = "",
     ) -> str:
-        if self._llm is None:
+        if not self._llm_factory.is_loaded:
             raise RuntimeError("ModelTranslator 尚未載入模型，請在 with 區塊內呼叫")
 
         system_content = (
@@ -154,28 +70,17 @@ class ModelTranslator:
         if extra_system_rules.strip():
             system_content = f"{system_content}\n\n{extra_system_rules.strip()}"
 
-        if hasattr(self._llm, "create_chat_completion"):
-            response = self._llm.create_chat_completion(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_content,
-                    },
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=512,
-                temperature=0.0,
-            )
-        else:
-            response = self._llm(
-                (
-                    f"[System]\n{system_content}\n\n"
-                    f"[User]\n{user_prompt}"
-                ),
-                max_tokens=512,
-                temperature=0.0,
-                stop=[],
-            )
+        response = self._llm_factory.create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_content,
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=512,
+            temperature=0.0,
+        )
 
         return self._extract_text_from_response(response)
 
@@ -424,7 +329,7 @@ class ModelTranslator:
         tgt_lang: str,
         history: Sequence[Mapping[str, str]] | None = None,
     ) -> str:
-        if self._llm is None:
+        if not self._llm_factory.is_loaded:
             raise RuntimeError("ModelTranslator 尚未載入模型，請在 with 區塊內呼叫")
 
         if src_lang not in cfg.LANG_MAP or tgt_lang not in cfg.LANG_MAP:

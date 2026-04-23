@@ -5,13 +5,11 @@ from fastapi import HTTPException
 from fastapi import status
 
 from api.deps import get_orchestrator
-from schemas.request import QueryRequest
 from schemas.request import UploadFileRequest
 from schemas.response import DeleteResponse
 from schemas.response import FileItem
 from schemas.response import FileListResponse
 from schemas.response import FileStatusResponse
-from schemas.response import QueryResponse
 
 router = APIRouter()
 
@@ -88,13 +86,3 @@ async def delete_artifact(collection_name: str) -> DeleteResponse:
         collection_name,
     )
 
-
-@router.post("/query", response_model=QueryResponse)
-async def post_query(request: QueryRequest) -> QueryResponse:
-    orchestrator = get_orchestrator()
-    return await asyncio.to_thread(
-        orchestrator.run_query,
-        request.question,
-        request.collection_name,
-        request.top_k,
-    )

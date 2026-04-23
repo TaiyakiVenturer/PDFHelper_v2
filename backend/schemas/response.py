@@ -68,15 +68,28 @@ class IndexResultMessage(BaseModel):
     retryable: bool = False
 
 
-class QuerySource(BaseModel):
-    text: str
+class QuerySourceItem(BaseModel):
     page_idx: int
-    score: float
+    type_v2: str
+    text: str
+    section_title: str
+    chunk_id: str
 
 
-class QueryResponse(BaseModel):
+class QuerySourcesMessage(BaseModel):
+    type: Literal["sources"] = "sources"
+    sources: list[QuerySourceItem] = Field(default_factory=list)
+
+
+class QueryDeltaMessage(BaseModel):
+    type: Literal["delta"] = "delta"
+    delta: str
+
+
+class QueryDoneMessage(BaseModel):
+    type: Literal["done"] = "done"
     answer: str
-    sources: list[QuerySource] = Field(default_factory=list)
+    processing_time: float
 
 
 class FileStatusResponse(BaseModel):

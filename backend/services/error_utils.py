@@ -15,6 +15,12 @@ def classify_error_message(stage: str, message: str) -> tuple[str, str, bool]:
     if "no request payload" in normalized:
         return f"REQ_{stage.upper()}_PAYLOAD_TIMEOUT", "request", True
 
+    if (
+        "collection" in normalized
+        and ("not found" in normalized or "does not exist" in normalized)
+    ):
+        return f"INP_{stage.upper()}_COLLECTION_NOT_FOUND", "input", False
+
     if "absolute path" in normalized:
         return f"INP_{stage.upper()}_ABSOLUTE_PATH_REQUIRED", "input", False
 
@@ -38,6 +44,12 @@ def classify_error_message(stage: str, message: str) -> tuple[str, str, bool]:
 
     if "stage is busy" in normalized or "another stage" in normalized:
         return f"REQ_{stage.upper()}_STAGE_BUSY", "request", True
+
+    if (
+        "stream" in normalized
+        and ("interrupt" in normalized or "disconnect" in normalized)
+    ):
+        return f"SYS_{stage.upper()}_STREAM_INTERRUPTED", "system", True
 
     return f"SYS_{stage.upper()}_UNEXPECTED", "system", False
 

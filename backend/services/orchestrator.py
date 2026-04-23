@@ -8,18 +8,26 @@ from pathlib import Path
 import shutil
 import time
 from typing import Callable
+from typing import Generator
 
 from schemas.response import ErrorCategory
+from schemas.response import ErrorMessage
 from schemas.response import DeleteResponse
 from schemas.response import FileStatusResponse
 from schemas.response import IndexResultMessage
 from schemas.response import ParseResultMessage
-from schemas.response import QueryResponse
+from schemas.response import QueryDeltaMessage
+from schemas.response import QueryDoneMessage
+from schemas.response import QuerySourceItem
+from schemas.response import QuerySourcesMessage
 from schemas.response import TranslateResultMessage
+from services.error_utils import build_error_message
 from services.error_utils import classify_error_message
 from services.indexer.chroma_service import ChromaService
 from services.indexer.chunker import StructureAwareChunker
 from services.indexer.embedder import BgeM3Embedder
+from services.llm.llama_factory import LlamaFactory
+from services.llm.llama_factory import build_query_messages
 from services.parser import content_merger
 from services.parser.mineru import MinerUCLIWrapper
 from services.reconstructor.md_reconstructor import MarkdownReconstructor
@@ -59,7 +67,8 @@ class PipelineOrchestrator:
         os.makedirs(self._chroma_dir, exist_ok=True)
 
         self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._artifacts_dir)
-        self._translate_service = ModelTranslator()
+        self._llm_factory = LlamaFactory()
+        self._translate_service = ModelTranslator(llm_factory=self._llm_factory)
         self._md_reconstructor = MarkdownReconstructor()
         self._embedder = BgeM3Embedder()
         self._chroma_service = ChromaService(persist_dir=self._chroma_dir)
@@ -554,13 +563,132 @@ class PipelineOrchestrator:
         finally:
             self._release_stage()
 
-    def run_query(self, question: str, collection_name: str, top_k: int = 10) -> QueryResponse:
-        # TODO: call ChromaDB retrieval.query(collection_name, question, top_k).
-        # Expected output: list[QuerySource].
+    def run_query(
+        self,
+        question: str,
+        collection_name: str,
+        top_k: int = 5,
+        history: list[dict[str, str]] | None = None,
+        on_progress: Callable[[float, str], None] | None = None,
+    ) -> Generator[
+        QuerySourcesMessage | QueryDeltaMessage | QueryDoneMessage | ErrorMessage,
+        None,
+        None,
+    ]:
+        progress_callback = self._resolve_progress_callback(on_progress)
+        start_time = time.time()
+        busy_msg = self._acquire_stage("query")
+        if busy_msg is not None:
+            yield build_error_message(
+                stage="query",
+                code="REQ_QUERY_STAGE_BUSY",
+                category="request",
+                message=busy_msg,
+                retryable=True,
+            )
+            return
 
-        # TODO: call LLM with retrieved chunks and question.
-        # Expected output: answer string.
-        return QueryResponse(answer="", sources=[])
+        try:
+            if question.strip() == "":
+                yield build_error_message(
+                    stage="query",
+                    code="INP_QUERY_EMPTY_QUESTION",
+                    category="input",
+                    message="question must not be empty",
+                    retryable=False,
+                )
+                return
+
+            if not self._chroma_service.collection_exists(collection_name):
+                yield build_error_message(
+                    stage="query",
+                    message=f"collection not found: {collection_name}",
+                )
+                return
+
+            progress_callback(10.0, "問題向量化中")
+            self._embedder.load()
+            query_vectors = self._embedder.embed_texts([question])
+            if len(query_vectors) == 0:
+                raise RuntimeError("query embedding result is empty")
+
+            query_vector = query_vectors[0]
+            collection = self._chroma_service.get_collection(collection_name)
+
+            progress_callback(20.0, "檢索相關段落中")
+            query_result = collection.query(
+                query_embeddings=[query_vector],
+                n_results=top_k,
+                include=["documents", "metadatas", "distances"],
+            )
+
+            meta_rows = query_result.get("metadatas") or [[]]
+            doc_rows = query_result.get("documents") or [[]]
+            metadatas = meta_rows[0] if meta_rows else []
+            documents = doc_rows[0] if doc_rows else []
+
+            source_items: list[QuerySourceItem] = []
+            for index, metadata in enumerate(metadatas):
+                current_metadata = metadata if isinstance(metadata, dict) else {}
+                fallback_doc = ""
+                if index < len(documents):
+                    fallback_doc = str(documents[index] or "")
+
+                source_items.append(
+                    QuerySourceItem(
+                        page_idx=self._normalize_int(current_metadata.get("page_idx"), default=0),
+                        type_v2=str(current_metadata.get("type_v2", "") or ""),
+                        text=str(current_metadata.get("text", "") or fallback_doc),
+                        section_title=str(current_metadata.get("section_title", "") or ""),
+                        chunk_id=str(current_metadata.get("chunk_id", "") or ""),
+                    )
+                )
+
+            yield QuerySourcesMessage(sources=source_items)
+
+            progress_callback(35.0, "組裝提示詞")
+            messages = build_query_messages(
+                question=question,
+                sources=source_items,
+                history=history,
+            )
+
+            progress_callback(45.0, "生成回答中")
+            answer_parts: list[str] = []
+            with self._llm_factory as llm:
+                stream = llm.create_chat_completion_stream(
+                    messages=messages,
+                    max_tokens=800,
+                    temperature=0.3,
+                )
+                for chunk in stream:
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+                    delta = first_choice.get("delta")
+                    if not isinstance(delta, dict):
+                        continue
+                    delta_text = str(delta.get("content", "") or "")
+                    if delta_text == "":
+                        continue
+
+                    answer_parts.append(delta_text)
+                    yield QueryDeltaMessage(delta=delta_text)
+
+            full_answer = "".join(answer_parts)
+            progress_callback(100.0, "回答完成")
+            yield QueryDoneMessage(
+                answer=full_answer,
+                processing_time=time.time() - start_time,
+            )
+        except Exception as error:
+            yield build_error_message(
+                stage="query",
+                message=str(error),
+            )
+        finally:
+            self._release_stage()
 
     def list_files(self) -> list[dict[str, str]]:
         pdf_dir = Path(self._pdf_dir)

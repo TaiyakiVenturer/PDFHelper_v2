@@ -39,6 +39,10 @@ class ChromaService:
             metadata={"hnsw:space": "cosine"},
         )
 
+    def get_collection(self, name: str) -> Any:
+        client = self._require_client()
+        return client.get_collection(name)
+
     def add_chunks(
         self,
         collection: Any,

@@ -24,7 +24,8 @@ class IndexRequest(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     collection_name: str
-    top_k: int = Field(default=10, ge=1)
+    top_k: int = Field(default=5, ge=1)
+    history: list[dict[str, str]] = Field(default_factory=list)
 
 
 class UploadFileRequest(BaseModel):
