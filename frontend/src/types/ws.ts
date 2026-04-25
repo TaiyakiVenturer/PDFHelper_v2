@@ -38,7 +38,7 @@ export interface ParseResultMessage {
 export interface TranslateResultMessage {
   type: "result";
   success: boolean;
-  translated_path?: string | null;
+  translated_markdown_path?: string | null;
   translated_count: number;
   skipped_count: number;
   processing_time: number;
@@ -60,4 +60,34 @@ export interface IndexResultMessage {
   retryable?: boolean;
 }
 
-export type WsMessage = ProgressMessage | ErrorMessage | ParseResultMessage;
+export type WsMessage = ProgressMessage | ErrorMessage | ParseResultMessage | TranslateResultMessage | IndexResultMessage;
+
+export interface QuerySourceItem {
+  page_idx: number;
+  type_v2: string;
+  text: string;
+  section_title: string;
+  chunk_id: string;
+}
+
+export interface QuerySourcesMessage {
+  type: "sources";
+  sources: QuerySourceItem[];
+}
+
+export interface QueryDeltaMessage {
+  type: "delta";
+  delta: string;
+}
+
+export interface QueryDoneMessage {
+  type: "done";
+  answer: string;
+  processing_time: number;
+}
+
+export type QueryStreamMessage =
+  | QuerySourcesMessage
+  | QueryDeltaMessage
+  | QueryDoneMessage
+  | ErrorMessage;

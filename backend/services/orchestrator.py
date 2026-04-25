@@ -344,66 +344,70 @@ class PipelineOrchestrator:
                     retryable=False,
                 )
 
-            translated_items: list[object] = []
+            if len(source_data) == 0:
+                return TranslateResultMessage(
+                    success=False,
+                    processing_time=time.time() - start_time,
+                    error="Input json contains no content items",
+                    error_code="INP_TRANSLATE_EMPTY_CONTENT",
+                    error_category=ErrorCategory.INPUT,
+                    retryable=False,
+                )
+
+            translated_items: list[content_merger.MinerUItem] = []
             translated_count = 0
             skipped_count = 0
-            total_items = len(source_data)
             history_slots: list[dict[str, str] | None] = [None] * 5
             history_cursor = 0
 
             with self._translate_service as translator:
-                for index, item in enumerate(source_data):
-                    if not isinstance(item, dict):
+                for index, raw_item in enumerate(source_data):
+                    if not isinstance(raw_item, dict):
                         skipped_count += 1
-                        translated_items.append(item)
+                        continue
+
+                    item = self._build_mineru_item(raw_item)
+                    if item.text.strip() == "":
+                        skipped_count += 1
+                        item.translated_text = ""
                     else:
-                        translated_item = dict(item)
-                        text = str(translated_item.get("text", "") or "")
-                        if text.strip() == "":
+                        history_snapshot = [
+                            entry for entry in history_slots if entry is not None
+                        ]
+                        translated_text = translator.translate_paragraph(
+                            item.text,
+                            src_lang,
+                            tgt_lang,
+                            history=history_snapshot,
+                        )
+                        item.translated_text = translated_text
+                        if translated_text.strip() == "":
                             skipped_count += 1
-                            translated_item["translated_text"] = ""
                         else:
-                            history_snapshot = [
-                                entry for entry in history_slots if entry is not None
-                            ]
-                            translated_text = translator.translate_paragraph(
-                                text,
-                                src_lang,
-                                tgt_lang,
-                                history=history_snapshot,
-                            )
-                            translated_item["translated_text"] = translated_text
-                            if translated_text.strip() == "":
-                                skipped_count += 1
-                            else:
-                                translated_count += 1
-                                history_slots[history_cursor] = {
-                                    "source_text": text,
-                                    "translated_text": translated_text,
-                                }
-                                history_cursor = (history_cursor + 1) % len(history_slots)
-                        translated_items.append(translated_item)
+                            translated_count += 1
+                            history_slots[history_cursor] = {
+                                "source_text": item.text,
+                                "translated_text": translated_text,
+                            }
+                            history_cursor = (history_cursor + 1) % len(history_slots)
+                    translated_items.append(item)
 
-                    if total_items > 0:
-                        progress = round(((index + 1) / total_items) * 100.0, 2)
-                        progress_callback(progress, "翻譯中")
-
-            if total_items == 0:
-                progress_callback(100.0, "翻譯完成")
+                    progress = round(((index + 1) / len(source_data)) * 100.0, 2)
+                    progress_callback(progress, "翻譯中")
 
             collection_stem = self._derive_collection_stem(json_path)
             translated_json_path = source_path.with_name(f"{collection_stem}_translated.json")
             with translated_json_path.open("w", encoding="utf-8") as output_file:
                 json.dump(
-                    translated_items,
+                    [asdict(item) for item in translated_items],
                     output_file,
                     ensure_ascii=False,
                     indent=2,
                 )
 
-            translated_path: str | None = None
+            translated_markdown_path: str | None = None
             try:
-                translated_path = self._md_reconstructor.reconstruct(
+                translated_markdown_path = self._md_reconstructor.reconstruct(
                     str(translated_json_path.resolve()),
                     use_translated=True,
                 )
@@ -416,7 +420,7 @@ class PipelineOrchestrator:
 
             return TranslateResultMessage(
                 success=True,
-                translated_path=translated_path,
+                translated_markdown_path=translated_markdown_path,
                 translated_count=translated_count,
                 skipped_count=skipped_count,
                 processing_time=time.time() - start_time,
@@ -748,15 +752,20 @@ class PipelineOrchestrator:
             parsed_dir / f"{collection_name}.md",
         ]
 
+        has_parsed = any(path.exists() for path in parsed_indicators)
+
+        markdown_candidate = parsed_dir / f"{collection_name}.md"
+        markdown_path: str | None = str(markdown_candidate.resolve()) if markdown_candidate.exists() else None
+
         translated_candidates = [
             parsed_dir / f"{collection_name}_translated.json",
             parsed_dir / f"{collection_name}_translated.md",
         ]
 
-        translated_path: str | None = None
+        translated_markdown_path: str | None = None
         for path in translated_candidates:
             if path.exists():
-                translated_path = str(path.resolve())
+                translated_markdown_path = str(path.resolve())
                 break
 
         has_indexed = False
@@ -769,30 +778,31 @@ class PipelineOrchestrator:
                 error,
             )
 
-        has_parsed = any(path.exists() for path in parsed_indicators)
-
         if has_indexed:
             return FileStatusResponse(
                 stage="indexed",
-                translated_path=translated_path,
+                markdown_path=markdown_path,
+                translated_markdown_path=translated_markdown_path,
                 collection_name=collection_name,
             )
 
-        if translated_path is not None:
+        if translated_markdown_path is not None:
             return FileStatusResponse(
                 stage="translated",
-                translated_path=translated_path,
+                markdown_path=markdown_path,
+                translated_markdown_path=translated_markdown_path,
                 collection_name=None,
             )
 
         if has_parsed:
             return FileStatusResponse(
                 stage="parsed",
-                translated_path=None,
+                markdown_path=markdown_path,
+                translated_markdown_path=None,
                 collection_name=None,
             )
 
-        return FileStatusResponse(stage="none", translated_path=None, collection_name=None)
+        return FileStatusResponse(stage="none", markdown_path=None, translated_markdown_path=None, collection_name=None)
 
     def delete_artifacts(self, collection_name: str) -> DeleteResponse:
         target_paths = [

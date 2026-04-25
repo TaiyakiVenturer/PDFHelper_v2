@@ -9,6 +9,7 @@ import {
   listPdfs,
   type PdfFileItem,
 } from "../services/fileService";
+import { useIndexStore } from "../stores/useIndexStore";
 import { useParseStore } from "../stores/useParseStore";
 import { useToastStore } from "../stores/useToastStore";
 import { useTranslateStore } from "../stores/useTranslateStore";
@@ -40,12 +41,15 @@ export function FileManager() {
   const startTranslate = useTranslateStore((state) => state.startTranslate);
   const confirmOverwrite = useTranslateStore((state) => state.confirmOverwrite);
   const cancelOverwrite = useTranslateStore((state) => state.cancelOverwrite);
+  const indexStatus = useIndexStore((state) => state.status);
+  const startIndex = useIndexStore((state) => state.startIndex);
 
   const isParsing = parseStatus === "parsing";
   const isTranslating =
     translateStatus === "checking" ||
     translateStatus === "awaitingConfirm" ||
     translateStatus === "translating";
+  const isIndexing = indexStatus === "checking" || indexStatus === "indexing";
 
   const clearPending = useCallback(() => {
     setPendingPath(null);
@@ -332,7 +336,7 @@ export function FileManager() {
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  disabled={isWorking || isParsing}
+                  disabled={isWorking || isParsing || isTranslating || isIndexing}
                   onClick={() => {
                     setDeleteTarget(file);
                   }}
@@ -342,7 +346,7 @@ export function FileManager() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={isWorking || isParsing || isTranslating}
+                  disabled={isWorking || isParsing || isTranslating || isIndexing}
                   onClick={() => {
                     void startParse(file.path);
                   }}
@@ -352,12 +356,22 @@ export function FileManager() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={isWorking || isParsing || isTranslating}
+                  disabled={isWorking || isParsing || isTranslating || isIndexing}
                   onClick={() => {
                     void startTranslate(file.name, file.path);
                   }}
                 >
                   {isTranslating ? "翻譯中..." : "翻譯"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={isWorking || isParsing || isTranslating || isIndexing}
+                  onClick={() => {
+                    void startIndex(file.name, file.path);
+                  }}
+                >
+                  {isIndexing ? "索引中..." : "索引"}
                 </button>
               </div>
             </div>

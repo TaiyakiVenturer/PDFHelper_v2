@@ -46,7 +46,7 @@ class ParseResultMessage(BaseModel):
 class TranslateResultMessage(BaseModel):
     type: Literal["result"] = "result"
     success: bool
-    translated_path: str | None = None
+    translated_markdown_path: str | None = None
     translated_count: int = 0
     skipped_count: int = 0
     processing_time: float
@@ -94,7 +94,8 @@ class QueryDoneMessage(BaseModel):
 
 class FileStatusResponse(BaseModel):
     stage: Literal["none", "parsed", "translated", "indexed"]
-    translated_path: str | None = None
+    markdown_path: str | None = None
+    translated_markdown_path: str | None = None
     collection_name: str | None = None
 
 

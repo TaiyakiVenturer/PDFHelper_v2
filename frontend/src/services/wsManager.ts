@@ -1,4 +1,4 @@
-import type { ErrorMessage, ErrorCategory, ProgressMessage } from "../types/ws";
+import type { ErrorMessage, ErrorCategory, ProgressMessage, QueryStreamMessage } from "../types/ws";
 
 interface ResultMessage {
   type: "result";
@@ -203,3 +203,137 @@ export function connectWs<TResult extends ResultMessage>(
     },
   };
 }
+
+export interface StreamWsCallbacks<TSources, TDelta, TDone> {
+  onSources?: (message: TSources) => void;
+  onDelta?: (message: TDelta) => void;
+  onDone?: (message: TDone) => void;
+  onError?: (message: ErrorMessage) => void;
+  onClose?: () => void;
+}
+
+export function connectStreamWs<
+  TSources extends { type: "sources" },
+  TDelta extends { type: "delta" },
+  TDone extends { type: "done" },
+>(
+  url: string,
+  payload: unknown,
+  callbacks: StreamWsCallbacks<TSources, TDelta, TDone>,
+): WsConnection {
+  let socket: WebSocket | null = null;
+  let closedByClient = false;
+  let doneReceived = false;
+  let errorEmitted = false;
+
+  const emitErrorOnce = (error: ErrorMessage): void => {
+    if (errorEmitted) {
+      return;
+    }
+
+    errorEmitted = true;
+    callbacks.onError?.(error);
+  };
+
+  try {
+    socket = new WebSocket(url);
+  } catch (error) {
+    emitErrorOnce(
+      createClientError(
+        "無法建立 WebSocket 連線",
+        error instanceof Error ? error.message : undefined,
+      ),
+    );
+    callbacks.onClose?.();
+    return {
+      close: () => {
+        // Nothing to close when constructor failed.
+      },
+    };
+  }
+
+  socket.onopen = () => {
+    try {
+      socket?.send(JSON.stringify(payload));
+    } catch (error) {
+      emitErrorOnce(
+        createClientError(
+          "無法傳送 WebSocket 請求資料",
+          error instanceof Error ? error.message : undefined,
+        ),
+      );
+      socket?.close();
+    }
+  };
+
+  socket.onmessage = (event) => {
+    let rawPayload: unknown;
+
+    try {
+      rawPayload = JSON.parse(event.data as string);
+    } catch {
+      emitErrorOnce(createClientError("收到無法解析的 WebSocket 訊息"));
+      return;
+    }
+
+    if (!isRecord(rawPayload)) {
+      emitErrorOnce(createClientError("收到格式錯誤的 WebSocket 訊息"));
+      return;
+    }
+
+    const messageType = toStringValue(rawPayload.type, "");
+
+    if (messageType === "sources") {
+      callbacks.onSources?.(rawPayload as TSources);
+      return;
+    }
+
+    if (messageType === "delta") {
+      callbacks.onDelta?.(rawPayload as TDelta);
+      return;
+    }
+
+    if (messageType === "done") {
+      doneReceived = true;
+      callbacks.onDone?.(rawPayload as TDone);
+      return;
+    }
+
+    if (messageType === "error") {
+      emitErrorOnce(normalizeBackendError(rawPayload));
+      return;
+    }
+
+    emitErrorOnce(
+      createClientError(`收到未知訊息類型: ${messageType || "<empty>"}`),
+    );
+  };
+
+  socket.onerror = () => {
+    emitErrorOnce(createClientError("WebSocket 連線錯誤"));
+  };
+
+  socket.onclose = () => {
+    if (!closedByClient && !doneReceived && !errorEmitted) {
+      emitErrorOnce(createClientError("WebSocket 連線意外中斷"));
+    }
+
+    callbacks.onClose?.();
+  };
+
+  return {
+    close: () => {
+      if (!socket) {
+        return;
+      }
+
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        closedByClient = true;
+        socket.close();
+      }
+    },
+  };
+}
+
+// Re-export QueryStreamMessage to keep import paths clean.
+export type { QueryStreamMessage };
