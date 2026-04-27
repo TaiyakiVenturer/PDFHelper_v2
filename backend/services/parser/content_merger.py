@@ -11,6 +11,50 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _norm_optional_str(raw: object) -> str | None:
+    if raw is None:
+        return None
+    value = str(raw)
+    return value if value != "" else None
+
+
+def _norm_optional_int(raw: object) -> int | None:
+    try:
+        if raw is None:
+            return None
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _norm_int(raw: object, default: int = 0) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _norm_string_list(raw: object) -> list[str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return None
+    normalized = [str(item) for item in raw]
+    return normalized or None
+
+
+def _norm_bbox(raw: object) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    bbox: list[int] = []
+    for value in raw:
+        try:
+            bbox.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return bbox
+
+
 @dataclass
 class MinerUItem:
     """Unified item schema merged from MinerU v1 and v2 outputs."""
@@ -31,6 +75,28 @@ class MinerUItem:
     footnote: list[str] | None
     title_level: int | None
     caption: list[str] | None
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, object]) -> "MinerUItem":
+        """Deserialize a MinerUItem from a flat dict (e.g. from DB or cache)."""
+        return cls(
+            type_v1=str(raw.get("type_v1", "unknown") or "unknown"),
+            type_v2=str(raw.get("type_v2", "unknown") or "unknown"),
+            text=str(raw.get("text", "") or ""),
+            translated_text=_norm_optional_str(raw.get("translated_text")),
+            list_items=_norm_string_list(raw.get("list_items")),
+            sub_type=_norm_optional_str(raw.get("sub_type")),
+            text_level=_norm_optional_int(raw.get("text_level")),
+            bbox=_norm_bbox(raw.get("bbox")),
+            page_idx=_norm_int(raw.get("page_idx"), default=0),
+            img_path=_norm_optional_str(raw.get("img_path")),
+            table_html=_norm_optional_str(raw.get("table_html")),
+            math_latex=_norm_optional_str(raw.get("math_latex")),
+            code_body=_norm_optional_str(raw.get("code_body")),
+            footnote=_norm_string_list(raw.get("footnote")),
+            title_level=_norm_optional_int(raw.get("title_level")),
+            caption=_norm_string_list(raw.get("caption")),
+        )
 
 
 def _load_v2_flat(path: str) -> list[dict]:

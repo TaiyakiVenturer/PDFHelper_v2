@@ -7,7 +7,6 @@ import {
 } from "../services/fileService";
 import { connectWs, type WsConnection } from "../services/wsManager";
 import type { ErrorMessage, IndexResultMessage, ProgressMessage } from "../types/ws";
-import { useParseStore } from "./useParseStore";
 import { useToastStore } from "./useToastStore";
 
 type IndexStatus = "idle" | "checking" | "indexing" | "done" | "error";
@@ -62,11 +61,6 @@ function getFilenameFromPath(path: string): string {
   return parts[parts.length - 1] || "";
 }
 
-function matchesCollection(jsonPath: string, collectionName: string): boolean {
-  const normalized = jsonPath.replace(/\\/g, "/");
-  const targetSuffix = `/${collectionName}_content_list_merged.json`;
-  return normalized.endsWith(targetSuffix) || normalized.includes(`/${collectionName}/`);
-}
 
 function failIndex(
   set: (partial: Partial<IndexState> | ((state: IndexState) => Partial<IndexState>)) => void,
@@ -150,11 +144,10 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       return;
     }
 
-    const parseResult = useParseStore.getState().result;
-    const parseJsonPath = parseResult?.json_path || null;
+    const parseJsonPath = statusResponse.json_path;
 
-    if (!parseJsonPath || !matchesCollection(parseJsonPath, collectionName)) {
-      failIndex(set, get, "請先在本次 session 中完成該檔案解析，再執行索引", null);
+    if (!parseJsonPath) {
+      failIndex(set, get, "找不到解析結果，請先解析該檔案", null);
       return;
     }
 

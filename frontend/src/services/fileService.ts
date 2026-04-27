@@ -7,8 +7,9 @@ export type FileStage = "none" | "parsed" | "translated" | "indexed";
 
 export interface FileStatusResponse {
   stage: FileStage;
-  translated_path: string | null;
-  collection_name: string | null;
+  markdown_path: string | null;
+  translated_markdown_path: string | null;
+  json_path: string | null;
 }
 
 interface FileListResponse {
@@ -193,6 +194,38 @@ export async function deletePdf(filename: string): Promise<void> {
   throw new FileServiceError(
     "SERVER",
     detail || `刪除失敗（HTTP ${response.status}）`,
+    response.status,
+  );
+}
+
+export async function deleteArtifact(collectionName: string): Promise<void> {
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_BASE}/artifact/${encodeURIComponent(collectionName)}`, {
+      method: "DELETE",
+    });
+  } catch (error) {
+    throw toNetworkError(error);
+  }
+
+  if (response.ok) {
+    return;
+  }
+
+  const detail = await readErrorDetail(response);
+
+  if (response.status === 404) {
+    throw new FileServiceError(
+      "NOT_FOUND",
+      detail || "找不到對應的輸出資料",
+      response.status,
+    );
+  }
+
+  throw new FileServiceError(
+    "SERVER",
+    detail || `刪除輸出失敗（HTTP ${response.status}）`,
     response.status,
   );
 }

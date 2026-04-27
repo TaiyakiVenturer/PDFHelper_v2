@@ -96,7 +96,7 @@ class FileStatusResponse(BaseModel):
     stage: Literal["none", "parsed", "translated", "indexed"]
     markdown_path: str | None = None
     translated_markdown_path: str | None = None
-    collection_name: str | None = None
+    json_path: str | None = None
 
 
 class DeleteResponse(BaseModel):

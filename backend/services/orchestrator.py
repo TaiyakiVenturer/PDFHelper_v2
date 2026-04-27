@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import shutil
 import time
+import hashlib
+import re
 from typing import Callable
 from typing import Generator
 
@@ -23,18 +25,44 @@ from schemas.response import QuerySourcesMessage
 from schemas.response import TranslateResultMessage
 from services.error_utils import build_error_message
 from services.error_utils import classify_error_message
-from services.indexer.chroma_service import ChromaService
-from services.indexer.chunker import StructureAwareChunker
-from services.indexer.embedder import BgeM3Embedder
-from services.llm.llama_factory import LlamaFactory
-from services.llm.llama_factory import build_query_messages
 from services.parser import content_merger
 from services.parser.mineru import MinerUCLIWrapper
 from services.reconstructor.md_reconstructor import MarkdownReconstructor
 from services.translator.model_translator import ModelTranslator
+from services.llm.llama_factory import LlamaFactory
+from services.llm.llama_factory import build_query_messages
+from services.indexer.chroma_service import ChromaService
+from services.indexer.chunker import StructureAwareChunker
+from services.indexer.embedder import BgeM3Embedder
 
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_collection_name(stem: str, artifacts_dir: str) -> str:
+    """Return the safe collection name for a given filename stem.
+
+    Applies the same sanitization rules as the parse pipeline.
+    Takes the stem directly (no extension), unlike _resolve_safe_filename
+    which takes a full PDF path.
+    """
+    projected_output = os.path.join(
+        os.path.abspath(artifacts_dir),
+        stem,
+        "auto",
+        f"{stem}_content_list.json",
+    )
+
+    has_illegal_chars = re.match(r"^[a-zA-Z0-9.-]+$", stem) is None
+    name_too_short = len(stem) < 3
+    name_too_long = len(stem) > 50
+    path_too_long = len(projected_output) > 250
+
+    if not any([has_illegal_chars, name_too_short, name_too_long, path_too_long]):
+        return stem
+
+    hash_part = hashlib.md5(stem.encode("utf-8")).hexdigest()[:8]
+    return f"doc_{hash_part}"
 
 
 class PipelineOrchestrator:
@@ -98,70 +126,11 @@ class PipelineOrchestrator:
         self._busy_stage = None
 
     @staticmethod
-    def _normalize_optional_str(raw: object) -> str | None:
-        if raw is None:
-            return None
-        value = str(raw)
-        return value if value != "" else None
-
-    @staticmethod
-    def _normalize_optional_int(raw: object) -> int | None:
-        try:
-            if raw is None:
-                return None
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
     def _normalize_int(raw: object, default: int = 0) -> int:
         try:
             return int(raw)
         except (TypeError, ValueError):
             return default
-
-    @staticmethod
-    def _normalize_string_list(raw: object) -> list[str] | None:
-        if raw is None:
-            return None
-        if not isinstance(raw, list):
-            return None
-        normalized = [str(item) for item in raw]
-        return normalized or None
-
-    @classmethod
-    def _normalize_bbox(cls, raw: object) -> list[int]:
-        if not isinstance(raw, list):
-            return []
-
-        bbox: list[int] = []
-        for value in raw:
-            try:
-                bbox.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        return bbox
-
-    @classmethod
-    def _build_mineru_item(cls, raw_item: dict[str, object]) -> content_merger.MinerUItem:
-        return content_merger.MinerUItem(
-            type_v1=str(raw_item.get("type_v1", "unknown") or "unknown"),
-            type_v2=str(raw_item.get("type_v2", "unknown") or "unknown"),
-            text=str(raw_item.get("text", "") or ""),
-            translated_text=cls._normalize_optional_str(raw_item.get("translated_text")),
-            list_items=cls._normalize_string_list(raw_item.get("list_items")),
-            sub_type=cls._normalize_optional_str(raw_item.get("sub_type")),
-            text_level=cls._normalize_optional_int(raw_item.get("text_level")),
-            bbox=cls._normalize_bbox(raw_item.get("bbox")),
-            page_idx=cls._normalize_int(raw_item.get("page_idx"), default=0),
-            img_path=cls._normalize_optional_str(raw_item.get("img_path")),
-            table_html=cls._normalize_optional_str(raw_item.get("table_html")),
-            math_latex=cls._normalize_optional_str(raw_item.get("math_latex")),
-            code_body=cls._normalize_optional_str(raw_item.get("code_body")),
-            footnote=cls._normalize_string_list(raw_item.get("footnote")),
-            title_level=cls._normalize_optional_int(raw_item.get("title_level")),
-            caption=cls._normalize_string_list(raw_item.get("caption")),
-        )
 
     def run_parse(
         self,
@@ -366,7 +335,7 @@ class PipelineOrchestrator:
                         skipped_count += 1
                         continue
 
-                    item = self._build_mineru_item(raw_item)
+                    item = content_merger.MinerUItem.from_dict(raw_item)
                     if item.text.strip() == "":
                         skipped_count += 1
                         item.translated_text = ""
@@ -503,7 +472,7 @@ class PipelineOrchestrator:
             for raw_item in source_data:
                 if not isinstance(raw_item, dict):
                     continue
-                items.append(self._build_mineru_item(raw_item))
+                items.append(content_merger.MinerUItem.from_dict(raw_item))
 
             collection_name = self._derive_collection_stem(json_path)
 
@@ -529,9 +498,13 @@ class PipelineOrchestrator:
             self._embedder.load()
 
             progress_callback(25.0, "計算 embedding")
-            embeddings = self._embedder.embed_texts(
-                [chunk.embedding_text for chunk in chunks]
-            )
+            texts_to_embed = [chunk.embedding_text for chunk in chunks]
+
+            def _on_embed_batch(done: int, total: int) -> None:
+                pct = 25.0 + (done / total) * 58.0
+                progress_callback(round(pct, 1), f"計算 embedding ({done}/{total} 批次)")
+
+            embeddings = self._embedder.embed_texts(texts_to_embed, on_batch=_on_embed_batch)
 
             progress_callback(85.0, "寫入 ChromaDB")
 
@@ -602,6 +575,8 @@ class PipelineOrchestrator:
                     retryable=False,
                 )
                 return
+
+            collection_name = resolve_collection_name(collection_name, self._artifacts_dir)
 
             if not self._chroma_service.collection_exists(collection_name):
                 yield build_error_message(
@@ -744,69 +719,50 @@ class PipelineOrchestrator:
         return DeleteResponse(success=True, message=f"Deleted {filename}")
 
     def get_file_status(self, collection_name: str, method: str = "auto") -> FileStatusResponse:
-        parsed_dir = Path(self._artifacts_dir) / collection_name / method
-        parsed_indicators = [
-            parsed_dir / f"{collection_name}_content_list_merged.json",
-            parsed_dir / f"{collection_name}_content_list_v2.json",
-            parsed_dir / f"{collection_name}_content_list.json",
-            parsed_dir / f"{collection_name}.md",
-        ]
+        save_collection_name = resolve_collection_name(collection_name, self._artifacts_dir)
+        parsed_dir = Path(self._artifacts_dir) / save_collection_name / method
 
-        has_parsed = any(path.exists() for path in parsed_indicators)
+        def resolve_optional(path: Path) -> str | None:
+            return str(path.resolve()) if path.exists() else None
 
-        markdown_candidate = parsed_dir / f"{collection_name}.md"
-        markdown_path: str | None = str(markdown_candidate.resolve()) if markdown_candidate.exists() else None
-
-        translated_candidates = [
-            parsed_dir / f"{collection_name}_translated.json",
-            parsed_dir / f"{collection_name}_translated.md",
-        ]
+        json_path = resolve_optional(parsed_dir / f"{save_collection_name}_content_list_merged.json")
+        markdown_path = resolve_optional(parsed_dir / f"{save_collection_name}.md")
 
         translated_markdown_path: str | None = None
-        for path in translated_candidates:
-            if path.exists():
-                translated_markdown_path = str(path.resolve())
+        for candidate in [
+            parsed_dir / f"{save_collection_name}_translated.json",
+            parsed_dir / f"{save_collection_name}_translated.md",
+        ]:
+            if candidate.exists():
+                translated_markdown_path = str(candidate.resolve())
                 break
 
         has_indexed = False
         try:
-            has_indexed = self._chroma_service.collection_exists(collection_name)
+            has_indexed = self._chroma_service.collection_exists(save_collection_name)
         except Exception as error:
-            logger.warning(
-                "Failed to check collection status for %s: %s",
-                collection_name,
-                error,
-            )
+            logger.warning("Failed to check collection status for %s: %s", save_collection_name, error)
 
         if has_indexed:
-            return FileStatusResponse(
-                stage="indexed",
-                markdown_path=markdown_path,
-                translated_markdown_path=translated_markdown_path,
-                collection_name=collection_name,
-            )
+            stage = "indexed"
+        elif translated_markdown_path is not None:
+            stage = "translated"
+        elif json_path is not None or markdown_path is not None:
+            stage = "parsed"
+        else:
+            stage = "none"
 
-        if translated_markdown_path is not None:
-            return FileStatusResponse(
-                stage="translated",
-                markdown_path=markdown_path,
-                translated_markdown_path=translated_markdown_path,
-                collection_name=None,
-            )
-
-        if has_parsed:
-            return FileStatusResponse(
-                stage="parsed",
-                markdown_path=markdown_path,
-                translated_markdown_path=None,
-                collection_name=None,
-            )
-
-        return FileStatusResponse(stage="none", markdown_path=None, translated_markdown_path=None, collection_name=None)
+        return FileStatusResponse(
+            stage=stage,
+            markdown_path=markdown_path,
+            translated_markdown_path=translated_markdown_path,
+            json_path=json_path,
+        )
 
     def delete_artifacts(self, collection_name: str) -> DeleteResponse:
+        save_collection_name = resolve_collection_name(collection_name, self._artifacts_dir)
         target_paths = [
-            Path(self._artifacts_dir) / collection_name,
+            Path(self._artifacts_dir) / save_collection_name,
         ]
 
         deleted_any = False
@@ -826,11 +782,11 @@ class PipelineOrchestrator:
                 errors.append(f"{path}: {error}")
 
         try:
-            deleted_collection = self._chroma_service.delete_collection(collection_name)
+            deleted_collection = self._chroma_service.delete_collection(save_collection_name)
             if deleted_collection:
                 deleted_any = True
         except Exception as error:
-            errors.append(f"chroma collection {collection_name}: {error}")
+            errors.append(f"chroma collection {save_collection_name}: {error}")
 
         if errors:
             return DeleteResponse(success=False, message="; ".join(errors))
@@ -838,10 +794,10 @@ class PipelineOrchestrator:
         if deleted_any:
             return DeleteResponse(
                 success=True,
-                message=f"Deleted artifacts for collection: {collection_name}",
+                message=f"Deleted artifacts for collection: {save_collection_name}",
             )
 
         return DeleteResponse(
             success=True,
-            message=f"No artifacts found for collection: {collection_name}",
+            message=f"No artifacts found for collection: {save_collection_name}",
         )

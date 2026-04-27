@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   copyPdfToDataDir,
+  deleteArtifact,
   deletePdf,
+  deriveCollectionName,
   isFileServiceError,
   listPdfs,
   type PdfFileItem,
@@ -31,6 +33,7 @@ export function FileManager() {
   const [isWorking, setIsWorking] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<PdfFileItem | null>(null);
+  const [deleteArtifactTarget, setDeleteArtifactTarget] = useState<PdfFileItem | null>(null);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [pendingName, setPendingName] = useState<string | null>(null);
 
@@ -252,6 +255,27 @@ export function FileManager() {
     }
   }, [addToast, deleteTarget, refreshFiles]);
 
+  const handleDeleteArtifactConfirm = useCallback(async () => {
+    if (!deleteArtifactTarget) {
+      return;
+    }
+
+    setIsWorking(true);
+
+    const collectionName = deriveCollectionName(deleteArtifactTarget.name);
+
+    try {
+      await deleteArtifact(collectionName);
+      addToast("success", `已刪除 ${deleteArtifactTarget.name} 的輸出`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "刪除輸出失敗";
+      addToast("error", message);
+    } finally {
+      setIsWorking(false);
+      setDeleteArtifactTarget(null);
+    }
+  }, [addToast, deleteArtifactTarget]);
+
   return (
     <section className="file-manager">
       <h2 className="panel-title">原檔管理</h2>
@@ -341,7 +365,17 @@ export function FileManager() {
                     setDeleteTarget(file);
                   }}
                 >
-                  刪除
+                  刪除原檔
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={isWorking || isParsing || isTranslating || isIndexing}
+                  onClick={() => {
+                    setDeleteArtifactTarget(file);
+                  }}
+                >
+                  刪除輸出
                 </button>
                 <button
                   type="button"
@@ -392,6 +426,22 @@ export function FileManager() {
         }}
         onConfirm={() => {
           void handleDeleteConfirm();
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteArtifactTarget)}
+        title="刪除輸出"
+        message={
+          deleteArtifactTarget
+            ? `確定要刪除 ${deleteArtifactTarget.name} 的所有輸出資料嗎？此操作無法復原。`
+            : ""
+        }
+        onCancel={() => {
+          setDeleteArtifactTarget(null);
+        }}
+        onConfirm={() => {
+          void handleDeleteArtifactConfirm();
         }}
       />
 
