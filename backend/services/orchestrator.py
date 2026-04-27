@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime
+from datetime import timezone
 import json
 import logging
 import os
@@ -66,19 +68,6 @@ def resolve_collection_name(stem: str, artifacts_dir: str) -> str:
 
 
 class PipelineOrchestrator:
-    @staticmethod
-    def _noop_progress(_percent: float, _message: str) -> None:
-        return None
-
-    @classmethod
-    def _resolve_progress_callback(
-        cls,
-        on_progress: Callable[[float, str], None] | None,
-    ) -> Callable[[float, str], None]:
-        if on_progress is not None:
-            return on_progress
-        return cls._noop_progress
-
     def __init__(self, data_dir: str) -> None:
         if not os.path.isabs(data_dir):
             raise ValueError("data_dir must be an absolute path")
@@ -116,6 +105,64 @@ class PipelineOrchestrator:
                 return stem.removesuffix(suffix)
         return stem
 
+    @staticmethod
+    def _save_translate_checkpoint(
+        progress_path: Path,
+        output_path: Path,
+        translated_items: list[content_merger.MinerUItem],
+        source_data: list,
+        next_index: int,
+        history_slots: list[dict[str, str] | None],
+        history_cursor: int,
+        src_lang: str,
+        tgt_lang: str,
+        source_file: str,
+        created_at: str,
+        translated_count: int,
+        skipped_count: int,
+    ) -> None:
+        partial_output = [asdict(item) for item in translated_items]
+        partial_output.extend(source_data[next_index:])
+        with output_path.open("w", encoding="utf-8") as f:
+            json.dump(partial_output, f, ensure_ascii=False, indent=2)
+
+        progress_data = {
+            "source_file": source_file,
+            "src_lang": src_lang,
+            "tgt_lang": tgt_lang,
+            "total_items": len(source_data),
+            "next_index": next_index,
+            "translated_item_count": len(translated_items),
+            "history_slots": history_slots,
+            "history_cursor": history_cursor,
+            "translated_count": translated_count,
+            "skipped_count": skipped_count,
+            "created_at": created_at,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with progress_path.open("w", encoding="utf-8") as f:
+            json.dump(progress_data, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _noop_progress(_percent: float, _message: str) -> None:
+        return None
+
+    @classmethod
+    def _resolve_progress_callback(
+        cls,
+        on_progress: Callable[[float, str], None] | None,
+    ) -> Callable[[float, str], None]:
+        if on_progress is not None:
+            return on_progress
+        return cls._noop_progress
+
+    @staticmethod
+    def _normalize_int(raw: object, default: int = 0) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
     def _acquire_stage(self, stage_name: str) -> str | None:
         if self._busy_stage is not None:
             return f"Another stage is busy: {self._busy_stage}"
@@ -124,13 +171,6 @@ class PipelineOrchestrator:
 
     def _release_stage(self) -> None:
         self._busy_stage = None
-
-    @staticmethod
-    def _normalize_int(raw: object, default: int = 0) -> int:
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return default
 
     def run_parse(
         self,
@@ -323,14 +363,62 @@ class PipelineOrchestrator:
                     retryable=False,
                 )
 
+            collection_stem = self._derive_collection_stem(json_path)
+            translated_json_path = source_path.with_name(f"{collection_stem}_translated.json")
+            progress_path = translated_json_path.with_name(
+                f"{collection_stem}_translate_progress.json"
+            )
+
             translated_items: list[content_merger.MinerUItem] = []
             translated_count = 0
             skipped_count = 0
             history_slots: list[dict[str, str] | None] = [None] * 5
             history_cursor = 0
+            start_index = 0
+            created_at = datetime.now(timezone.utc).isoformat()
+
+            if progress_path.exists():
+                try:
+                    prog = json.loads(progress_path.read_text(encoding="utf-8"))
+                    params_match = (
+                        prog.get("src_lang") == src_lang
+                        and prog.get("tgt_lang") == tgt_lang
+                        and prog.get("total_items") == len(source_data)
+                        and prog.get("source_file") == json_path
+                    )
+                    if params_match and translated_json_path.exists():
+                        start_index = prog["next_index"]
+                        history_slots = prog["history_slots"]
+                        history_cursor = prog["history_cursor"]
+                        translated_count = prog.get("translated_count", 0)
+                        skipped_count = prog.get("skipped_count", 0)
+                        created_at = prog.get("created_at", created_at)
+                        translated_item_count = prog.get("translated_item_count", start_index)
+                        partial_data = json.loads(
+                            translated_json_path.read_text(encoding="utf-8")
+                        )
+                        translated_items = [
+                            content_merger.MinerUItem.from_dict(d)
+                            for d in partial_data[:translated_item_count]
+                            if isinstance(d, dict)
+                        ]
+                        progress_callback(
+                            round(start_index / len(source_data) * 100, 2),
+                            "從斷點繼續翻譯",
+                        )
+                    else:
+                        progress_path.unlink(missing_ok=True)
+                except Exception as checkpoint_error:
+                    logger.warning(
+                        "Failed to load translation checkpoint: %s", checkpoint_error
+                    )
+                    progress_path.unlink(missing_ok=True)
+
+            _CHECKPOINT_EVERY = 5
 
             with self._translate_service as translator:
-                for index, raw_item in enumerate(source_data):
+                for index in range(start_index, len(source_data)):
+                    raw_item = source_data[index]
                     if not isinstance(raw_item, dict):
                         skipped_count += 1
                         continue
@@ -364,8 +452,23 @@ class PipelineOrchestrator:
                     progress = round(((index + 1) / len(source_data)) * 100.0, 2)
                     progress_callback(progress, "翻譯中")
 
-            collection_stem = self._derive_collection_stem(json_path)
-            translated_json_path = source_path.with_name(f"{collection_stem}_translated.json")
+                    if (index + 1) % _CHECKPOINT_EVERY == 0:
+                        self._save_translate_checkpoint(
+                            progress_path=progress_path,
+                            output_path=translated_json_path,
+                            translated_items=translated_items,
+                            source_data=source_data,
+                            next_index=index + 1,
+                            history_slots=history_slots,
+                            history_cursor=history_cursor,
+                            src_lang=src_lang,
+                            tgt_lang=tgt_lang,
+                            source_file=json_path,
+                            created_at=created_at,
+                            translated_count=translated_count,
+                            skipped_count=skipped_count,
+                        )
+
             with translated_json_path.open("w", encoding="utf-8") as output_file:
                 json.dump(
                     [asdict(item) for item in translated_items],
@@ -373,6 +476,7 @@ class PipelineOrchestrator:
                     ensure_ascii=False,
                     indent=2,
                 )
+            progress_path.unlink(missing_ok=True)
 
             translated_markdown_path: str | None = None
             try:

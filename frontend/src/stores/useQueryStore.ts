@@ -75,19 +75,22 @@ function failQuery(
   get: () => QueryState,
   messageText: string,
   code: string | null = null,
+  retryable: boolean = false,
 ): void {
   const currentStatus = get().status;
   if (currentStatus === "error") return;
 
-  if (code === "STAGE_BUSY") {
+  if (code?.endsWith("_STAGE_BUSY")) {
     set({ status: "idle", question: "", sources: [], answer: "", interruptedAt: null, errorMessage: null, connection: null });
     useToastStore.getState().addToast("warning", "另一個任務正在執行中，請稍後再試");
     return;
   }
 
+  const displayMessage = retryable ? `${messageText}，請稍後再試` : messageText;
+
   set({
     status: "error",
-    errorMessage: messageText,
+    errorMessage: displayMessage,
     interruptedAt: resolveInterruptedAt(currentStatus),
     connection: null,
   });
@@ -182,7 +185,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
           wsConnection?.close();
         },
         onError: (error: ErrorMessage) => {
-          failQuery(set, get, getErrorMessage(error), error.code ?? null);
+          failQuery(set, get, getErrorMessage(error), error.code ?? null, error.retryable);
         },
         onClose: () => {
           const current = get();

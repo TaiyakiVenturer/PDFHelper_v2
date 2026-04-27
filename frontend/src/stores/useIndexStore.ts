@@ -48,7 +48,7 @@ function getErrorMessage(error: ErrorMessage): string {
 }
 
 function getFriendlyStageBusyMessage(code?: string | null): string | null {
-  if (code === "STAGE_BUSY") {
+  if (code?.endsWith("_STAGE_BUSY")) {
     return "另一個任務正在執行中，請稍後再試";
   }
   return null;
@@ -67,6 +67,7 @@ function failIndex(
   get: () => IndexState,
   messageText: string,
   code: string | null = null,
+  retryable: boolean = false,
 ): void {
   if (get().status === "error") return;
 
@@ -78,14 +79,16 @@ function failIndex(
     return;
   }
 
+  const displayMessage = retryable ? `${messageText}，請稍後再試` : messageText;
+
   set({
     status: "error",
-    errorMessage: messageText,
+    errorMessage: displayMessage,
     message: "",
     connection: null,
   });
 
-  useToastStore.getState().addToast("error", messageText);
+  useToastStore.getState().addToast("error", displayMessage);
 }
 
 export const useIndexStore = create<IndexState>((set, get) => ({
@@ -167,7 +170,7 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       onResult: (result: IndexResultMessage) => {
         if (!result.success) {
           set({ result });
-          failIndex(set, get, result.error || "索引失敗", result.error_code || null);
+          failIndex(set, get, result.error || "索引失敗", result.error_code || null, result.retryable ?? false);
           wsConnection?.close();
           return;
         }
@@ -191,7 +194,7 @@ export const useIndexStore = create<IndexState>((set, get) => ({
         wsConnection?.close();
       },
       onError: (error: ErrorMessage) => {
-        failIndex(set, get, getErrorMessage(error), error.code || null);
+        failIndex(set, get, getErrorMessage(error), error.code || null, error.retryable);
       },
       onClose: () => {
         const current = get();

@@ -71,7 +71,7 @@ function getErrorMessage(error: ErrorMessage): string {
 }
 
 function getFriendlyStageBusyMessage(code?: string | null): string | null {
-  if (code === "STAGE_BUSY") {
+  if (code?.endsWith("_STAGE_BUSY")) {
     return "另一個任務正在執行中，請稍後再試";
   }
 
@@ -98,21 +98,24 @@ function failTranslate(
   get: () => TranslateState,
   messageText: string,
   code: string | null = null,
+  retryable: boolean = false,
 ): void {
   if (get().status === "error") {
     return;
   }
 
+  const friendly = getFriendlyStageBusyMessage(code);
+  const displayMessage = friendly ?? (retryable ? `${messageText}，請稍後再試` : messageText);
+
   set({
     status: "error",
-    errorMessage: messageText,
+    errorMessage: displayMessage,
     message: "",
     connection: null,
     pendingJsonPath: null,
   });
 
-  const friendly = getFriendlyStageBusyMessage(code);
-  useToastStore.getState().addToast("error", friendly || messageText);
+  useToastStore.getState().addToast("error", displayMessage);
 }
 
 export const useTranslateStore = create<TranslateState>((set, get) => ({
@@ -225,6 +228,7 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
               get,
               result.error || "翻譯失敗",
               result.error_code || null,
+              result.retryable ?? false,
             );
             wsConnection?.close();
             return;
@@ -250,7 +254,7 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
           wsConnection?.close();
         },
         onError: (error: ErrorMessage) => {
-          failTranslate(set, get, getErrorMessage(error), error.code || null);
+          failTranslate(set, get, getErrorMessage(error), error.code || null, error.retryable);
         },
         onClose: () => {
           const current = get();
@@ -317,6 +321,7 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
             get,
             result.error || "翻譯失敗",
             result.error_code || null,
+            result.retryable ?? false,
           );
           wsConnection?.close();
           return;
@@ -342,7 +347,7 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
         wsConnection?.close();
       },
       onError: (error: ErrorMessage) => {
-        failTranslate(set, get, getErrorMessage(error), error.code || null);
+        failTranslate(set, get, getErrorMessage(error), error.code || null, error.retryable);
       },
       onClose: () => {
         const currentState = get();
