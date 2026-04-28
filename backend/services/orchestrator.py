@@ -761,7 +761,15 @@ class PipelineOrchestrator:
         finally:
             self._release_stage()
 
-    def list_files(self) -> list[dict[str, str]]:
+    @staticmethod
+    def _entry_upload_date(entry: Path) -> str | None:
+        try:
+            mtime = entry.stat().st_mtime
+            return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        except OSError:
+            return None
+
+    def list_files(self) -> list[dict]:
         pdf_dir = Path(self._pdf_dir)
         allowed_suffixes = {".pdf"}
 
@@ -769,6 +777,7 @@ class PipelineOrchestrator:
             {
                 "pdf_name": entry.name,
                 "collection_name": self._resolve_collection_name(entry.stem, self._artifacts_dir),
+                "upload_date": self._entry_upload_date(entry),
             }
             for entry in pdf_dir.iterdir()
             if entry.is_file() and entry.suffix.lower() in allowed_suffixes
@@ -797,6 +806,7 @@ class PipelineOrchestrator:
         return {
             "pdf_name": destination.name,
             "collection_name": self._resolve_collection_name(destination.stem, self._artifacts_dir),
+            "upload_date": self._entry_upload_date(destination),
         }
 
     def delete_file(self, filename: str) -> DeleteResponse:
@@ -842,6 +852,27 @@ class PipelineOrchestrator:
             is_translated=is_translated,
             is_indexed=is_indexed,
         )
+
+    def get_markdown_content(self, collection_name: str, version: str) -> tuple[str, str]:
+        """Return (raw_markdown_content, parse_method). Raise FileNotFoundError if unavailable."""
+        status = self.get_file_status(collection_name)
+        if status.parse_method is None:
+            raise FileNotFoundError(f"No parsed content for collection: {collection_name}")
+
+        method = status.parse_method
+
+        if version == "translated":
+            if not status.is_translated:
+                raise FileNotFoundError(f"No translation found for collection: {collection_name}")
+            filename = f"{collection_name}_translated.md"
+        else:
+            filename = f"{collection_name}.md"
+
+        md_path = Path(self._artifacts_dir) / collection_name / method / filename
+        if not md_path.exists():
+            raise FileNotFoundError(f"Markdown file not found: {md_path}")
+
+        return md_path.read_text(encoding="utf-8"), method
 
     def delete_artifacts(self, collection_name: str) -> DeleteResponse:
         target_paths = [

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 
-import {
-  getFileStatus,
-  isFileServiceError,
-  listPdfs,
-  type PdfFileItem,
-} from "../services/fileService";
+import "katex/dist/katex.min.css";
+
 import { useQueryStore } from "../stores/useQueryStore";
-import { useToastStore } from "../stores/useToastStore";
 
 const INTERRUPTED_AT_LABELS: Record<string, string> = {
   before_sources: "檢索前",
@@ -15,13 +15,13 @@ const INTERRUPTED_AT_LABELS: Record<string, string> = {
   during_delta: "生成中",
 };
 
-export function QueryPanel() {
-  const [files, setFiles] = useState<PdfFileItem[]>([]);
-  const [selectedCollection, setSelectedCollection] = useState("");
-  const [question, setQuestion] = useState("");
-  const [isFileListLoading, setIsFileListLoading] = useState(false);
+interface QueryPanelProps {
+  collectionName: string | null;
+}
 
-  const addToast = useToastStore((state) => state.addToast);
+export function QueryPanel({ collectionName }: QueryPanelProps) {
+  const [question, setQuestion] = useState("");
+
   const status = useQueryStore((state) => state.status);
   const sources = useQueryStore((state) => state.sources);
   const answer = useQueryStore((state) => state.answer);
@@ -34,52 +34,12 @@ export function QueryPanel() {
   const isBusy =
     status === "checking" || status === "retrieving" || status === "generating";
 
-  const canSubmit = question.trim().length > 0 && selectedCollection !== "" && !isBusy;
-
-  const loadFiles = useCallback(async () => {
-    setIsFileListLoading(true);
-    try {
-      const list = await listPdfs();
-      setFiles(list);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "讀取檔案列表失敗";
-      addToast("error", message);
-    } finally {
-      setIsFileListLoading(false);
-    }
-  }, [addToast]);
-
-  useEffect(() => {
-    void loadFiles();
-  }, [loadFiles]);
-
-  const handleSelectChange = useCallback(
-    async (value: string) => {
-      setSelectedCollection(value);
-      if (!value) return;
-
-      try {
-        const fileStatus = await getFileStatus(value);
-        if (!fileStatus.is_indexed) {
-          addToast("warning", "該檔案尚未建立索引，請先到左側執行索引");
-          setSelectedCollection("");
-        }
-      } catch (error) {
-        if (isFileServiceError(error)) {
-          addToast("error", error.message);
-        } else {
-          addToast("error", "讀取檔案狀態失敗");
-        }
-        setSelectedCollection("");
-      }
-    },
-    [addToast],
-  );
+  const canSubmit = question.trim().length > 0 && collectionName !== null && !isBusy;
 
   const handleSubmit = useCallback(() => {
-    if (!canSubmit) return;
-    void submitQuery(question, selectedCollection);
-  }, [canSubmit, question, selectedCollection, submitQuery]);
+    if (!canSubmit || !collectionName) return;
+    void submitQuery(question, collectionName);
+  }, [canSubmit, collectionName, question, submitQuery]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -110,35 +70,18 @@ export function QueryPanel() {
     return "送出問題";
   })();
 
+  if (!collectionName) {
+    return (
+      <div className="query-panel">
+        <h2 className="panel-title">問答查詢</h2>
+        <p className="query-hint">請先在左側選擇一份 PDF 檔案。</p>
+      </div>
+    );
+  }
+
   return (
     <div className="query-panel">
       <h2 className="panel-title">問答查詢</h2>
-
-      <div className="query-section">
-        <label className="query-label" htmlFor="query-file-select">
-          選擇檔案
-        </label>
-        {isFileListLoading ? (
-          <p className="query-hint">載入檔案中...</p>
-        ) : (
-          <select
-            id="query-file-select"
-            className="query-select"
-            value={selectedCollection}
-            onChange={(e) => {
-              void handleSelectChange(e.target.value);
-            }}
-            disabled={isBusy}
-          >
-            <option value="">— 選擇 PDF 檔案 —</option>
-            {files.map((file) => (
-              <option key={file.collection_name} value={file.collection_name}>
-                {file.pdf_name}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
 
       <div className="query-section">
         <label className="query-label" htmlFor="query-question">
@@ -149,10 +92,8 @@ export function QueryPanel() {
           className="query-textarea"
           rows={3}
           placeholder="輸入問題，Ctrl+Enter 送出"
-          value={question}
-          onChange={(e) => {
-            setQuestion(e.target.value);
-          }}
+          value={question ?? ""}
+          onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={isBusy}
         />
@@ -183,15 +124,15 @@ export function QueryPanel() {
           <p className="query-label">檢索來源 ({sources.length})</p>
           <div className="query-sources">
             {sources.map((src) => (
-              <div key={src.chunk_id} className="query-source-item">
-                <p className="query-source-title">
-                  {src.section_title || "（無標題）"}
+              <details key={src.chunk_id} className="query-source-item">
+                <summary className="query-source-summary">
+                  <span className="query-source-title">
+                    {src.section_title || "（無標題）"}
+                  </span>
                   <span className="query-source-page">第 {src.page_idx + 1} 頁</span>
-                </p>
-                <p className="query-source-text">
-                  {src.text.length > 120 ? `${src.text.slice(0, 120)}…` : src.text}
-                </p>
-              </div>
+                </summary>
+                <div className="query-source-detail">{src.text}</div>
+              </details>
             ))}
           </div>
         </div>
@@ -207,7 +148,12 @@ export function QueryPanel() {
             {status === "retrieving" && !answer ? (
               <span className="query-hint">檢索中...</span>
             ) : (
-              answer
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeRaw, rehypeKatex]}
+              >
+                {answer}
+              </ReactMarkdown>
             )}
           </div>
           {result && (

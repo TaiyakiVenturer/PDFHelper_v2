@@ -1,6 +1,7 @@
 export interface PdfFileItem {
   pdf_name: string;
   collection_name: string;
+  upload_date?: string;
 }
 
 export interface FileStatusResponse {
@@ -210,6 +211,42 @@ export async function deleteArtifact(collectionName: string): Promise<void> {
   throw new FileServiceError(
     "SERVER",
     detail || `刪除輸出失敗（HTTP ${response.status}）`,
+    response.status,
+  );
+}
+
+export async function getMarkdownContent(
+  collectionName: string,
+  version: "original" | "translated",
+): Promise<string> {
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${API_BASE}/file/${encodeURIComponent(collectionName)}/markdown?version=${version}`,
+      { method: "GET" },
+    );
+  } catch (error) {
+    throw toNetworkError(error);
+  }
+
+  if (response.ok) {
+    return response.text();
+  }
+
+  const detail = await readErrorDetail(response);
+
+  if (response.status === 404) {
+    throw new FileServiceError(
+      "NOT_FOUND",
+      detail || "找不到對應的 Markdown 檔案",
+      response.status,
+    );
+  }
+
+  throw new FileServiceError(
+    "SERVER",
+    detail || `讀取 Markdown 失敗（HTTP ${response.status}）`,
     response.status,
   );
 }

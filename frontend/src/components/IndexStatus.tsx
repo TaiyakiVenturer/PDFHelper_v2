@@ -22,6 +22,15 @@ export function IndexStatus() {
     );
   }
 
+  if (status === "awaitingConfirm") {
+    return (
+      <section className="parse-status" aria-live="polite">
+        <h2 className="panel-title">索引狀態</h2>
+        <p className="parse-main">等待覆寫確認</p>
+      </section>
+    );
+  }
+
   if (status === "indexing") {
     return (
       <section className="parse-status" aria-live="polite">

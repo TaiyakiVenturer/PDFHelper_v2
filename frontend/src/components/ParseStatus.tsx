@@ -12,6 +12,24 @@ export function ParseStatus() {
     return null;
   }
 
+  if (status === "checking") {
+    return (
+      <section className="parse-status" aria-live="polite">
+        <h2 className="panel-title">解析狀態</h2>
+        <p className="parse-main">正在確認檔案狀態...</p>
+      </section>
+    );
+  }
+
+  if (status === "awaitingConfirm") {
+    return (
+      <section className="parse-status" aria-live="polite">
+        <h2 className="panel-title">解析狀態</h2>
+        <p className="parse-main">等待覆寫確認</p>
+      </section>
+    );
+  }
+
   if (status === "parsing") {
     return (
       <section className="parse-status" aria-live="polite">

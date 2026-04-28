@@ -8,7 +8,13 @@ import { connectWs, type WsConnection } from "../services/wsManager";
 import type { ErrorMessage, IndexResultMessage, ProgressMessage } from "../types/ws";
 import { useToastStore } from "./useToastStore";
 
-type IndexStatus = "idle" | "checking" | "indexing" | "done" | "error";
+type IndexStatus =
+  | "idle"
+  | "checking"
+  | "awaitingConfirm"
+  | "indexing"
+  | "done"
+  | "error";
 
 interface IndexRequestPayload {
   collection_name: string;
@@ -24,7 +30,10 @@ interface IndexState {
   connection: WsConnection | null;
   targetFilename: string | null;
   collectionName: string | null;
+  pendingMethod: string | null;
   startIndex: (collectionName: string) => Promise<void>;
+  confirmOverwrite: () => void;
+  cancelOverwrite: () => void;
   reset: () => void;
 }
 
@@ -67,7 +76,13 @@ function failIndex(
   const friendly = getFriendlyStageBusyMessage(code);
 
   if (friendly) {
-    set({ status: "idle", message: "", connection: null, errorMessage: null });
+    set({
+      status: "idle",
+      message: "",
+      connection: null,
+      errorMessage: null,
+      pendingMethod: null,
+    });
     useToastStore.getState().addToast("warning", friendly);
     return;
   }
@@ -79,6 +94,7 @@ function failIndex(
     errorMessage: displayMessage,
     message: "",
     connection: null,
+    pendingMethod: null,
   });
 
   useToastStore.getState().addToast("error", displayMessage);
@@ -93,10 +109,11 @@ export const useIndexStore = create<IndexState>((set, get) => ({
   connection: null,
   targetFilename: null,
   collectionName: null,
+  pendingMethod: null,
   startIndex: async (collectionName: string) => {
     const { status, connection } = get();
 
-    if (status === "checking" || status === "indexing") {
+    if (status === "checking" || status === "awaitingConfirm" || status === "indexing") {
       return;
     }
 
@@ -110,6 +127,8 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       errorMessage: null,
       connection: null,
       targetFilename: collectionName,
+      collectionName,
+      pendingMethod: null,
     });
 
     let statusResponse;
@@ -132,69 +151,45 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       return;
     }
 
-    const method = statusResponse.parse_method;
-    let wsConnection: WsConnection | null = null;
+    const method = statusResponse.parse_method as IndexRequestPayload["method"];
 
-    const payload: IndexRequestPayload = {
-      collection_name: collectionName,
-      method,
-    };
+    if (statusResponse.is_indexed) {
+      set({
+        status: "awaitingConfirm",
+        message: "檔案已有索引結果，等待覆寫確認",
+        pendingMethod: method,
+      });
+      return;
+    }
 
-    wsConnection = connectWs<IndexResultMessage>(getIndexWsUrl(), payload, {
-      onProgress: (progress: ProgressMessage) => {
-        set({
-          status: "indexing",
-          percent: clampPercent(progress.percent),
-          message: progress.message,
-          connection: wsConnection,
-        });
-      },
-      onResult: (result: IndexResultMessage) => {
-        if (!result.success) {
-          set({ result });
-          failIndex(set, get, result.error || "索引失敗", result.error_code || null, result.retryable ?? false);
-          wsConnection?.close();
-          return;
-        }
+    startWebSocketIndex(collectionName, method, set, get);
+  },
+  confirmOverwrite: () => {
+    const current = get();
 
-        set({
-          status: "done",
-          percent: 100,
-          message: "索引完成",
-          result,
-          errorMessage: null,
-          connection: null,
-          collectionName,
-        });
+    if (!current.collectionName || !current.pendingMethod || current.status !== "awaitingConfirm") {
+      return;
+    }
 
-        useToastStore
-          .getState()
-          .addToast(
-            "success",
-            `索引完成，共切分 ${result.chunk_count} 個 chunk，耗時 ${result.processing_time.toFixed(2)} 秒`,
-          );
-
-        wsConnection?.close();
-      },
-      onError: (error: ErrorMessage) => {
-        failIndex(set, get, getErrorMessage(error), error.code || null, error.retryable);
-      },
-      onClose: () => {
-        const current = get();
-        if (current.status === "indexing") {
-          failIndex(set, get, "與索引服務的連線已中斷", null);
-          return;
-        }
-        set({ connection: null });
-      },
-    });
+    startWebSocketIndex(
+      current.collectionName,
+      current.pendingMethod as IndexRequestPayload["method"],
+      set,
+      get,
+    );
+  },
+  cancelOverwrite: () => {
+    if (get().status !== "awaitingConfirm") {
+      return;
+    }
 
     set({
-      status: "indexing",
+      status: "idle",
       percent: 0,
-      message: "索引準備中...",
+      message: "",
       errorMessage: null,
-      connection: wsConnection,
+      connection: null,
+      pendingMethod: null,
     });
   },
   reset: () => {
@@ -208,6 +203,81 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       connection: null,
       targetFilename: null,
       collectionName: null,
+      pendingMethod: null,
     });
   },
 }));
+
+function startWebSocketIndex(
+  collectionName: string,
+  method: IndexRequestPayload["method"],
+  set: (partial: Partial<IndexState> | ((state: IndexState) => Partial<IndexState>)) => void,
+  get: () => IndexState,
+): void {
+  let wsConnection: WsConnection | null = null;
+
+  const payload: IndexRequestPayload = {
+    collection_name: collectionName,
+    method,
+  };
+
+  wsConnection = connectWs<IndexResultMessage>(getIndexWsUrl(), payload, {
+    onProgress: (progress: ProgressMessage) => {
+      set({
+        status: "indexing",
+        percent: clampPercent(progress.percent),
+        message: progress.message,
+        connection: wsConnection,
+      });
+    },
+    onResult: (result: IndexResultMessage) => {
+      if (!result.success) {
+        set({ result });
+        failIndex(set, get, result.error || "索引失敗", result.error_code || null, result.retryable ?? false);
+        wsConnection?.close();
+        return;
+      }
+
+      set({
+        status: "done",
+        percent: 100,
+        message: "索引完成",
+        result,
+        errorMessage: null,
+        connection: null,
+        collectionName,
+        pendingMethod: null,
+      });
+
+      useToastStore
+        .getState()
+        .addToast(
+          "success",
+          `索引完成，共切分 ${result.chunk_count} 個 chunk，耗時 ${result.processing_time.toFixed(2)} 秒`,
+        );
+
+      wsConnection?.close();
+    },
+    onError: (error: ErrorMessage) => {
+      failIndex(set, get, getErrorMessage(error), error.code || null, error.retryable);
+    },
+    onClose: () => {
+      const current = get();
+      if (current.status === "indexing") {
+        failIndex(set, get, "與索引服務的連線已中斷", null);
+        return;
+      }
+      set({ connection: null });
+    },
+  });
+
+  set({
+    status: "indexing",
+    percent: 0,
+    message: "索引準備中...",
+    errorMessage: null,
+    connection: wsConnection,
+    collectionName,
+    pendingMethod: null,
+  });
+}

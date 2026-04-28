@@ -1,8 +1,11 @@
 import asyncio
+import re
 
 from fastapi import APIRouter
 from fastapi import HTTPException
+from fastapi import Request
 from fastapi import status
+from fastapi.responses import PlainTextResponse
 
 from api.deps import get_orchestrator
 from schemas.request import UploadFileRequest
@@ -12,6 +15,32 @@ from schemas.response import FileListResponse
 from schemas.response import FileStatusResponse
 
 router = APIRouter()
+
+
+@router.get("/file/{collection_name}/markdown", response_class=PlainTextResponse)
+async def get_markdown(
+    request: Request,
+    collection_name: str,
+    version: str = "original",
+) -> str:
+    orchestrator = get_orchestrator()
+    try:
+        content, method = await asyncio.to_thread(
+            orchestrator.get_markdown_content,
+            collection_name,
+            version,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+    base_url = str(request.base_url).rstrip("/")
+    static_prefix = f"{base_url}/static/artifacts/{collection_name}/{method}"
+    content = re.sub(
+        r"!\[([^\]]*)\]\(images/([^)]+)\)",
+        rf"![\1]({static_prefix}/images/\2)",
+        content,
+    )
+    return content
 
 
 @router.get("/file/{collection_name}/status", response_model=FileStatusResponse)

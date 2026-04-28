@@ -250,7 +250,7 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
 
     const method = statusResponse.parse_method;
 
-    if (statusResponse.is_translated || statusResponse.is_indexed) {
+    if (statusResponse.is_translated) {
       set({
         status: "awaitingConfirm",
         message: "檔案已有翻譯結果，等待覆寫確認",

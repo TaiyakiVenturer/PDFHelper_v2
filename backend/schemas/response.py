@@ -103,6 +103,7 @@ class DeleteResponse(BaseModel):
 class FileItem(BaseModel):
     pdf_name: str
     collection_name: str
+    upload_date: str | None = None
 
 
 class FileListResponse(BaseModel):

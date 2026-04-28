@@ -1,40 +1,23 @@
-import { FileManager } from "./components/FileManager";
-import { IndexStatus } from "./components/IndexStatus";
-import { ParseStatus } from "./components/ParseStatus";
-import { QueryPanel } from "./components/QueryPanel";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AppNav } from "./components/AppNav";
 import { Toast } from "./components/Toast";
-import { TranslateStatus } from "./components/TranslateStatus";
+import { FilesPage } from "./pages/FilesPage";
+import { HomePage } from "./pages/HomePage";
+import { QueryPage } from "./pages/QueryPage";
 import "./app.css";
 
 function App() {
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div className="app-title-wrap">
-          <h1 className="app-title">PDFHelper Frontend</h1>
-          <p className="app-subtitle">原檔管理、解析、翻譯、索引與查詢流程</p>
-        </div>
-        <span className="app-version">v0.1.0</span>
-      </header>
+      <AppNav />
 
       <main className="app-main">
-        <div className="app-layout">
-          <div className="app-left">
-            <section className="panel">
-              <FileManager />
-            </section>
-            <div className="status-stack">
-              <ParseStatus />
-              <TranslateStatus />
-              <IndexStatus />
-            </div>
-          </div>
-          <div className="app-right">
-            <section className="panel">
-              <QueryPanel />
-            </section>
-          </div>
-        </div>
+        <Routes>
+          <Route path="/home" element={<HomePage />} />
+          <Route path="/files" element={<FilesPage />} />
+          <Route path="/query" element={<QueryPage />} />
+          <Route path="*" element={<Navigate to="/home" replace />} />
+        </Routes>
       </main>
 
       <Toast />

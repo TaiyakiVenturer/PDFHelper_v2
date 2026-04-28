@@ -15,6 +15,7 @@ import { useParseStore } from "../stores/useParseStore";
 import { useToastStore } from "../stores/useToastStore";
 import { useTranslateStore } from "../stores/useTranslateStore";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { OverwriteConfirmDialog } from "./OverwriteConfirmDialog.tsx";
 
 function getFilenameFromPath(path: string): string {
   const normalized = path.trim();
@@ -39,19 +40,29 @@ export function FileManager() {
   const addToast = useToastStore((state) => state.addToast);
   const parseStatus = useParseStore((state) => state.status);
   const startParse = useParseStore((state) => state.startParse);
+  const confirmParseOverwrite = useParseStore((state) => state.confirmOverwrite);
+  const cancelParseOverwrite = useParseStore((state) => state.cancelOverwrite);
   const translateStatus = useTranslateStore((state) => state.status);
   const startTranslate = useTranslateStore((state) => state.startTranslate);
   const confirmOverwrite = useTranslateStore((state) => state.confirmOverwrite);
   const cancelOverwrite = useTranslateStore((state) => state.cancelOverwrite);
   const indexStatus = useIndexStore((state) => state.status);
   const startIndex = useIndexStore((state) => state.startIndex);
+  const confirmIndexOverwrite = useIndexStore((state) => state.confirmOverwrite);
+  const cancelIndexOverwrite = useIndexStore((state) => state.cancelOverwrite);
 
-  const isParsing = parseStatus === "parsing";
+  const isParsing =
+    parseStatus === "checking" ||
+    parseStatus === "awaitingConfirm" ||
+    parseStatus === "parsing";
   const isTranslating =
     translateStatus === "checking" ||
     translateStatus === "awaitingConfirm" ||
     translateStatus === "translating";
-  const isIndexing = indexStatus === "checking" || indexStatus === "indexing";
+  const isIndexing =
+    indexStatus === "checking" ||
+    indexStatus === "awaitingConfirm" ||
+    indexStatus === "indexing";
 
   const clearPending = useCallback(() => {
     setPendingPath(null);
@@ -442,14 +453,26 @@ export function FileManager() {
         }}
       />
 
-      <ConfirmDialog
+      <OverwriteConfirmDialog
         open={translateStatus === "awaitingConfirm"}
         title="覆寫翻譯"
         message="該檔案已有翻譯結果，重新翻譯將覆寫現有內容。確定要繼續嗎？"
-        confirmLabel="繼續覆寫"
-        cancelLabel="取消"
         onCancel={cancelOverwrite}
         onConfirm={confirmOverwrite}
+      />
+      <OverwriteConfirmDialog
+        open={parseStatus === "awaitingConfirm"}
+        title="覆寫解析"
+        message="該檔案已有解析結果，重新解析將覆寫現有內容。確定要繼續嗎？"
+        onCancel={cancelParseOverwrite}
+        onConfirm={confirmParseOverwrite}
+      />
+      <OverwriteConfirmDialog
+        open={indexStatus === "awaitingConfirm"}
+        title="覆寫索引"
+        message="該檔案已有索引結果，重新索引將覆寫現有內容。確定要繼續嗎？"
+        onCancel={cancelIndexOverwrite}
+        onConfirm={confirmIndexOverwrite}
       />
     </section>
   );
