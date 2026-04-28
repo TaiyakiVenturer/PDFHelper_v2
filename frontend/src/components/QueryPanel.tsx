@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  deriveCollectionName,
   getFileStatus,
   isFileServiceError,
   listPdfs,
@@ -61,7 +60,7 @@ export function QueryPanel() {
 
       try {
         const fileStatus = await getFileStatus(value);
-        if (fileStatus.stage !== "indexed") {
+        if (!fileStatus.is_indexed) {
           addToast("warning", "該檔案尚未建立索引，請先到左側執行索引");
           setSelectedCollection("");
         }
@@ -133,8 +132,8 @@ export function QueryPanel() {
           >
             <option value="">— 選擇 PDF 檔案 —</option>
             {files.map((file) => (
-              <option key={file.path} value={deriveCollectionName(file.name)}>
-                {file.name}
+              <option key={file.collection_name} value={file.collection_name}>
+                {file.pdf_name}
               </option>
             ))}
           </select>

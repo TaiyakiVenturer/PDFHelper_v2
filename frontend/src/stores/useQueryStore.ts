@@ -144,7 +144,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
 
     if (get().status !== "checking") return;
 
-    if (statusResponse.stage !== "indexed") {
+    if (!statusResponse.is_indexed) {
       failQuery(set, get, "請先為該檔案建立索引");
       return;
     }

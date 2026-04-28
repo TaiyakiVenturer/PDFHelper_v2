@@ -15,12 +15,11 @@ router = APIRouter()
 
 
 @router.get("/file/{collection_name}/status", response_model=FileStatusResponse)
-async def get_file_status(collection_name: str, method: str = "auto") -> FileStatusResponse:
+async def get_file_status(collection_name: str) -> FileStatusResponse:
     orchestrator = get_orchestrator()
     return await asyncio.to_thread(
         orchestrator.get_file_status,
         collection_name,
-        method,
     )
 
 

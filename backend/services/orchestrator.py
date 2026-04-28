@@ -41,30 +41,6 @@ from services.indexer.embedder import BgeM3Embedder
 logger = logging.getLogger(__name__)
 
 
-def resolve_collection_name(stem: str, artifacts_dir: str) -> str:
-    """Return the safe collection name for a given filename stem.
-
-    Applies the same sanitization rules as the parse pipeline.
-    Takes the stem directly (no extension), unlike _resolve_safe_filename
-    which takes a full PDF path.
-    """
-    projected_output = os.path.join(
-        os.path.abspath(artifacts_dir),
-        stem,
-        "auto",
-        f"{stem}_content_list.json",
-    )
-
-    has_illegal_chars = re.match(r"^[a-zA-Z0-9.-]+$", stem) is None
-    name_too_short = len(stem) < 3
-    name_too_long = len(stem) > 50
-    path_too_long = len(projected_output) > 250
-
-    if not any([has_illegal_chars, name_too_short, name_too_long, path_too_long]):
-        return stem
-
-    hash_part = hashlib.md5(stem.encode("utf-8")).hexdigest()[:8]
-    return f"doc_{hash_part}"
 
 
 class PipelineOrchestrator:
@@ -91,6 +67,30 @@ class PipelineOrchestrator:
         self._chroma_service = ChromaService(persist_dir=self._chroma_dir)
         
         self._busy_stage: str | None = None
+
+    @staticmethod
+    def _resolve_collection_name(stem: str, artifacts_dir: str) -> str:
+        projected_output = os.path.join(
+            os.path.abspath(artifacts_dir),
+            stem,
+            "auto",
+            f"{stem}_content_list.json",
+        )
+        has_illegal_chars = re.match(r"^[a-zA-Z0-9.-]+$", stem) is None
+        name_too_short = len(stem) < 3
+        name_too_long = len(stem) > 50
+        path_too_long = len(projected_output) > 250
+        if not any([has_illegal_chars, name_too_short, name_too_long, path_too_long]):
+            return stem
+        hash_part = hashlib.md5(stem.encode("utf-8")).hexdigest()[:8]
+        return f"doc_{hash_part}"
+
+    def _find_pdf_by_collection_name(self, collection_name: str) -> Path:
+        for entry in Path(self._pdf_dir).iterdir():
+            if entry.is_file() and entry.suffix.lower() == ".pdf":
+                if self._resolve_collection_name(entry.stem, self._artifacts_dir) == collection_name:
+                    return entry
+        raise FileNotFoundError(f"No PDF found for collection: {collection_name}")
 
     @staticmethod
     def _derive_collection_stem(json_path: str) -> str:
@@ -174,7 +174,7 @@ class PipelineOrchestrator:
 
     def run_parse(
         self,
-        pdf_path: str,
+        collection_name: str,
         method: str,
         lang: str,
         formula: bool,
@@ -195,6 +195,19 @@ class PipelineOrchestrator:
             )
 
         try:
+            try:
+                pdf_path_obj = self._find_pdf_by_collection_name(collection_name)
+            except FileNotFoundError as not_found:
+                return ParseResultMessage(
+                    success=False,
+                    processing_time=time.time() - start_time,
+                    error=str(not_found),
+                    error_code="INP_PARSE_PDF_NOT_FOUND",
+                    error_category=ErrorCategory.INPUT,
+                    retryable=False,
+                )
+            pdf_path = str(pdf_path_obj)
+
             process_result = self._mineru_wrapper.process(
                 pdf_path=pdf_path,
                 method=method,
@@ -251,9 +264,8 @@ class PipelineOrchestrator:
                     indent=2,
                 )
 
-            markdown_path: str | None = None
             try:
-                markdown_path = self._md_reconstructor.reconstruct(
+                self._md_reconstructor.reconstruct(
                     merged_json_path,
                     use_translated=False,
                 )
@@ -264,17 +276,9 @@ class PipelineOrchestrator:
                     reconstruct_error,
                 )
 
-            image_dir: str | None = None
-            if process_result.output_file_paths.image_path:
-                image_dir = str(
-                    Path(process_result.output_file_paths.image_path[0]).resolve().parent
-                )
-
             return ParseResultMessage(
                 success=True,
-                markdown_path=markdown_path,
-                json_path=merged_json_path,
-                image_dir=image_dir,
+                collection_name=collection_name,
                 processing_time=time.time() - start_time,
                 error="",
                 error_code=None,
@@ -300,7 +304,8 @@ class PipelineOrchestrator:
 
     def run_translate(
         self,
-        json_path: str,
+        collection_name: str,
+        method: str,
         src_lang: str,
         tgt_lang: str,
         on_progress: Callable[[float, str], None] | None = None,
@@ -319,26 +324,22 @@ class PipelineOrchestrator:
             )
 
         try:
-            if not os.path.isabs(json_path):
-                return TranslateResultMessage(
-                    success=False,
-                    processing_time=time.time() - start_time,
-                    error="json_path must be an absolute path",
-                    error_code="INP_TRANSLATE_ABSOLUTE_PATH_REQUIRED",
-                    error_category=ErrorCategory.INPUT,
-                    retryable=False,
-                )
-
-            source_path = Path(json_path)
+            source_path = (
+                Path(self._artifacts_dir)
+                / collection_name
+                / method
+                / f"{collection_name}_content_list_merged.json"
+            )
             if not source_path.exists():
                 return TranslateResultMessage(
                     success=False,
                     processing_time=time.time() - start_time,
-                    error=f"Input json file not found: {json_path}",
+                    error=f"Merged JSON not found for {collection_name}/{method}. Has parsing been run?",
                     error_code="INP_TRANSLATE_FILE_NOT_FOUND",
                     error_category=ErrorCategory.INPUT,
                     retryable=False,
                 )
+            json_path = str(source_path)
 
             with source_path.open("r", encoding="utf-8") as source_file:
                 source_data = json.load(source_file)
@@ -363,10 +364,9 @@ class PipelineOrchestrator:
                     retryable=False,
                 )
 
-            collection_stem = self._derive_collection_stem(json_path)
-            translated_json_path = source_path.with_name(f"{collection_stem}_translated.json")
+            translated_json_path = source_path.with_name(f"{collection_name}_translated.json")
             progress_path = translated_json_path.with_name(
-                f"{collection_stem}_translate_progress.json"
+                f"{collection_name}_translate_progress.json"
             )
 
             translated_items: list[content_merger.MinerUItem] = []
@@ -478,9 +478,8 @@ class PipelineOrchestrator:
                 )
             progress_path.unlink(missing_ok=True)
 
-            translated_markdown_path: str | None = None
             try:
-                translated_markdown_path = self._md_reconstructor.reconstruct(
+                self._md_reconstructor.reconstruct(
                     str(translated_json_path.resolve()),
                     use_translated=True,
                 )
@@ -493,7 +492,6 @@ class PipelineOrchestrator:
 
             return TranslateResultMessage(
                 success=True,
-                translated_markdown_path=translated_markdown_path,
                 translated_count=translated_count,
                 skipped_count=skipped_count,
                 processing_time=time.time() - start_time,
@@ -521,7 +519,8 @@ class PipelineOrchestrator:
 
     def run_index(
         self,
-        json_path: str,
+        collection_name: str,
+        method: str,
         on_progress: Callable[[float, str], None] | None = None,
     ) -> IndexResultMessage:
         progress_callback = self._resolve_progress_callback(on_progress)
@@ -538,22 +537,17 @@ class PipelineOrchestrator:
             )
 
         try:
-            if not os.path.isabs(json_path):
-                return IndexResultMessage(
-                    success=False,
-                    processing_time=time.time() - start_time,
-                    error="json_path must be an absolute path",
-                    error_code="INP_INDEX_ABSOLUTE_PATH_REQUIRED",
-                    error_category=ErrorCategory.INPUT,
-                    retryable=False,
-                )
-
-            source_path = Path(json_path)
+            source_path = (
+                Path(self._artifacts_dir)
+                / collection_name
+                / method
+                / f"{collection_name}_content_list_merged.json"
+            )
             if not source_path.exists():
                 return IndexResultMessage(
                     success=False,
                     processing_time=time.time() - start_time,
-                    error=f"Input json file not found: {json_path}",
+                    error=f"Merged JSON not found for {collection_name}/{method}. Has parsing been run?",
                     error_code="INP_INDEX_FILE_NOT_FOUND",
                     error_category=ErrorCategory.INPUT,
                     retryable=False,
@@ -578,8 +572,6 @@ class PipelineOrchestrator:
                     continue
                 items.append(content_merger.MinerUItem.from_dict(raw_item))
 
-            collection_name = self._derive_collection_stem(json_path)
-
             progress_callback(5.0, "切分 chunk 中")
 
             chunker = StructureAwareChunker()
@@ -588,7 +580,6 @@ class PipelineOrchestrator:
             if len(chunks) == 0:
                 return IndexResultMessage(
                     success=False,
-                    collection_name=None,
                     chunk_count=0,
                     processing_time=time.time() - start_time,
                     error="No chunks generated from input content",
@@ -619,7 +610,6 @@ class PipelineOrchestrator:
 
             return IndexResultMessage(
                 success=True,
-                collection_name=collection_name,
                 chunk_count=len(chunks),
                 processing_time=time.time() - start_time,
                 error="",
@@ -679,8 +669,6 @@ class PipelineOrchestrator:
                     retryable=False,
                 )
                 return
-
-            collection_name = resolve_collection_name(collection_name, self._artifacts_dir)
 
             if not self._chroma_service.collection_exists(collection_name):
                 yield build_error_message(
@@ -779,14 +767,14 @@ class PipelineOrchestrator:
 
         files = [
             {
-                "name": entry.name,
-                "path": str(entry.resolve()),
+                "pdf_name": entry.name,
+                "collection_name": self._resolve_collection_name(entry.stem, self._artifacts_dir),
             }
             for entry in pdf_dir.iterdir()
             if entry.is_file() and entry.suffix.lower() in allowed_suffixes
         ]
 
-        return sorted(files, key=lambda item: item["name"].lower())
+        return sorted(files, key=lambda item: item["pdf_name"].lower())
 
     def upload_file(self, source_path: str) -> dict[str, str]:
         source = Path(source_path)
@@ -807,8 +795,8 @@ class PipelineOrchestrator:
         shutil.copy2(source, destination)
 
         return {
-            "name": destination.name,
-            "path": str(destination.resolve()),
+            "pdf_name": destination.name,
+            "collection_name": self._resolve_collection_name(destination.stem, self._artifacts_dir),
         }
 
     def delete_file(self, filename: str) -> DeleteResponse:
@@ -822,51 +810,42 @@ class PipelineOrchestrator:
         target_path.unlink()
         return DeleteResponse(success=True, message=f"Deleted {filename}")
 
-    def get_file_status(self, collection_name: str, method: str = "auto") -> FileStatusResponse:
-        save_collection_name = resolve_collection_name(collection_name, self._artifacts_dir)
-        parsed_dir = Path(self._artifacts_dir) / save_collection_name / method
+    def get_file_status(self, collection_name: str) -> FileStatusResponse:
+        artifacts_base = Path(self._artifacts_dir) / collection_name
 
-        def resolve_optional(path: Path) -> str | None:
-            return str(path.resolve()) if path.exists() else None
+        parse_method: str | None = None
+        if artifacts_base.exists():
+            for method_dir in artifacts_base.iterdir():
+                if method_dir.is_dir() and (
+                    method_dir / f"{collection_name}_content_list_merged.json"
+                ).exists():
+                    parse_method = method_dir.name
+                    break
 
-        json_path = resolve_optional(parsed_dir / f"{save_collection_name}_content_list_merged.json")
-        markdown_path = resolve_optional(parsed_dir / f"{save_collection_name}.md")
+        is_parsed = parse_method is not None
 
-        translated_markdown_path: str | None = None
-        for candidate in [
-            parsed_dir / f"{save_collection_name}_translated.json",
-            parsed_dir / f"{save_collection_name}_translated.md",
-        ]:
-            if candidate.exists():
-                translated_markdown_path = str(candidate.resolve())
-                break
+        is_translated = False
+        if parse_method is not None:
+            is_translated = (
+                artifacts_base / parse_method / f"{collection_name}_translated.json"
+            ).exists()
 
-        has_indexed = False
+        is_indexed = False
         try:
-            has_indexed = self._chroma_service.collection_exists(save_collection_name)
+            is_indexed = self._chroma_service.collection_exists(collection_name)
         except Exception as error:
-            logger.warning("Failed to check collection status for %s: %s", save_collection_name, error)
-
-        if has_indexed:
-            stage = "indexed"
-        elif translated_markdown_path is not None:
-            stage = "translated"
-        elif json_path is not None or markdown_path is not None:
-            stage = "parsed"
-        else:
-            stage = "none"
+            logger.warning("Failed to check collection status for %s: %s", collection_name, error)
 
         return FileStatusResponse(
-            stage=stage,
-            markdown_path=markdown_path,
-            translated_markdown_path=translated_markdown_path,
-            json_path=json_path,
+            is_parsed=is_parsed,
+            parse_method=parse_method,
+            is_translated=is_translated,
+            is_indexed=is_indexed,
         )
 
     def delete_artifacts(self, collection_name: str) -> DeleteResponse:
-        save_collection_name = resolve_collection_name(collection_name, self._artifacts_dir)
         target_paths = [
-            Path(self._artifacts_dir) / save_collection_name,
+            Path(self._artifacts_dir) / collection_name,
         ]
 
         deleted_any = False
@@ -886,11 +865,11 @@ class PipelineOrchestrator:
                 errors.append(f"{path}: {error}")
 
         try:
-            deleted_collection = self._chroma_service.delete_collection(save_collection_name)
+            deleted_collection = self._chroma_service.delete_collection(collection_name)
             if deleted_collection:
                 deleted_any = True
         except Exception as error:
-            errors.append(f"chroma collection {save_collection_name}: {error}")
+            errors.append(f"chroma collection {collection_name}: {error}")
 
         if errors:
             return DeleteResponse(success=False, message="; ".join(errors))
@@ -898,10 +877,10 @@ class PipelineOrchestrator:
         if deleted_any:
             return DeleteResponse(
                 success=True,
-                message=f"Deleted artifacts for collection: {save_collection_name}",
+                message=f"Deleted artifacts for collection: {collection_name}",
             )
 
         return DeleteResponse(
             success=True,
-            message=f"No artifacts found for collection: {save_collection_name}",
+            message=f"No artifacts found for collection: {collection_name}",
         )

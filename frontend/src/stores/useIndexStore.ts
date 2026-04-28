@@ -1,7 +1,6 @@
 import { create } from "zustand";
 
 import {
-  deriveCollectionName,
   getFileStatus,
   isFileServiceError,
 } from "../services/fileService";
@@ -12,7 +11,8 @@ import { useToastStore } from "./useToastStore";
 type IndexStatus = "idle" | "checking" | "indexing" | "done" | "error";
 
 interface IndexRequestPayload {
-  json_path: string;
+  collection_name: string;
+  method: "auto" | "txt" | "ocr";
 }
 
 interface IndexState {
@@ -23,7 +23,8 @@ interface IndexState {
   errorMessage: string | null;
   connection: WsConnection | null;
   targetFilename: string | null;
-  startIndex: (filename: string, filePath: string) => Promise<void>;
+  collectionName: string | null;
+  startIndex: (collectionName: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -53,14 +54,6 @@ function getFriendlyStageBusyMessage(code?: string | null): string | null {
   }
   return null;
 }
-
-function getFilenameFromPath(path: string): string {
-  const normalized = path.trim();
-  if (!normalized) return "";
-  const parts = normalized.split(/[/\\]/);
-  return parts[parts.length - 1] || "";
-}
-
 
 function failIndex(
   set: (partial: Partial<IndexState> | ((state: IndexState) => Partial<IndexState>)) => void,
@@ -99,7 +92,8 @@ export const useIndexStore = create<IndexState>((set, get) => ({
   errorMessage: null,
   connection: null,
   targetFilename: null,
-  startIndex: async (filename: string, filePath: string) => {
+  collectionName: null,
+  startIndex: async (collectionName: string) => {
     const { status, connection } = get();
 
     if (status === "checking" || status === "indexing") {
@@ -108,15 +102,6 @@ export const useIndexStore = create<IndexState>((set, get) => ({
 
     connection?.close();
 
-    const fallbackName = getFilenameFromPath(filePath);
-    const targetName = filename.trim() || fallbackName;
-    const collectionName = deriveCollectionName(targetName);
-
-    if (!collectionName) {
-      failIndex(set, get, "無法判斷檔案名稱，請重新選擇檔案");
-      return;
-    }
-
     set({
       status: "checking",
       percent: 0,
@@ -124,12 +109,12 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       result: null,
       errorMessage: null,
       connection: null,
-      targetFilename: targetName,
+      targetFilename: collectionName,
     });
 
     let statusResponse;
     try {
-      statusResponse = await getFileStatus(collectionName, "auto");
+      statusResponse = await getFileStatus(collectionName);
     } catch (error) {
       if (isFileServiceError(error)) {
         failIndex(set, get, error.message, null);
@@ -142,21 +127,18 @@ export const useIndexStore = create<IndexState>((set, get) => ({
 
     if (get().status !== "checking") return;
 
-    if (statusResponse.stage === "none") {
+    if (!statusResponse.is_parsed || !statusResponse.parse_method) {
       failIndex(set, get, "檔案尚未解析，請先執行解析", null);
       return;
     }
 
-    const parseJsonPath = statusResponse.json_path;
-
-    if (!parseJsonPath) {
-      failIndex(set, get, "找不到解析結果，請先解析該檔案", null);
-      return;
-    }
-
+    const method = statusResponse.parse_method;
     let wsConnection: WsConnection | null = null;
 
-    const payload: IndexRequestPayload = { json_path: parseJsonPath };
+    const payload: IndexRequestPayload = {
+      collection_name: collectionName,
+      method,
+    };
 
     wsConnection = connectWs<IndexResultMessage>(getIndexWsUrl(), payload, {
       onProgress: (progress: ProgressMessage) => {
@@ -182,6 +164,7 @@ export const useIndexStore = create<IndexState>((set, get) => ({
           result,
           errorMessage: null,
           connection: null,
+          collectionName,
         });
 
         useToastStore
@@ -224,6 +207,7 @@ export const useIndexStore = create<IndexState>((set, get) => ({
       errorMessage: null,
       connection: null,
       targetFilename: null,
+      collectionName: null,
     });
   },
 }));

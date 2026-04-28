@@ -33,9 +33,7 @@ class ErrorMessage(BaseModel):
 class ParseResultMessage(BaseModel):
     type: Literal["result"] = "result"
     success: bool
-    markdown_path: str | None = None
-    json_path: str | None = None
-    image_dir: str | None = None
+    collection_name: str | None = None
     processing_time: float
     error: str = ""
     error_code: str | None = None
@@ -46,7 +44,6 @@ class ParseResultMessage(BaseModel):
 class TranslateResultMessage(BaseModel):
     type: Literal["result"] = "result"
     success: bool
-    translated_markdown_path: str | None = None
     translated_count: int = 0
     skipped_count: int = 0
     processing_time: float
@@ -59,7 +56,6 @@ class TranslateResultMessage(BaseModel):
 class IndexResultMessage(BaseModel):
     type: Literal["result"] = "result"
     success: bool
-    collection_name: str | None = None
     chunk_count: int = 0
     processing_time: float
     error: str = ""
@@ -93,10 +89,10 @@ class QueryDoneMessage(BaseModel):
 
 
 class FileStatusResponse(BaseModel):
-    stage: Literal["none", "parsed", "translated", "indexed"]
-    markdown_path: str | None = None
-    translated_markdown_path: str | None = None
-    json_path: str | None = None
+    is_parsed: bool
+    parse_method: Literal["auto", "txt", "ocr"] | None = None
+    is_translated: bool
+    is_indexed: bool
 
 
 class DeleteResponse(BaseModel):
@@ -105,8 +101,8 @@ class DeleteResponse(BaseModel):
 
 
 class FileItem(BaseModel):
-    name: str
-    path: str
+    pdf_name: str
+    collection_name: str
 
 
 class FileListResponse(BaseModel):

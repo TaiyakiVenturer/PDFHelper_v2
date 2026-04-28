@@ -1,15 +1,13 @@
 export interface PdfFileItem {
-  name: string;
-  path: string;
+  pdf_name: string;
+  collection_name: string;
 }
 
-export type FileStage = "none" | "parsed" | "translated" | "indexed";
-
 export interface FileStatusResponse {
-  stage: FileStage;
-  markdown_path: string | null;
-  translated_markdown_path: string | null;
-  json_path: string | null;
+  is_parsed: boolean;
+  parse_method: "auto" | "txt" | "ocr" | null;
+  is_translated: boolean;
+  is_indexed: boolean;
 }
 
 interface FileListResponse {
@@ -36,20 +34,6 @@ export class FileServiceError extends Error {
 
 export function isFileServiceError(error: unknown): error is FileServiceError {
   return error instanceof FileServiceError;
-}
-
-export function deriveCollectionName(filename: string): string {
-  const trimmed = filename.trim();
-  if (!trimmed) {
-    return "";
-  }
-
-  const dotIndex = trimmed.lastIndexOf(".");
-  if (dotIndex <= 0) {
-    return trimmed;
-  }
-
-  return trimmed.slice(0, dotIndex);
 }
 
 async function readErrorDetail(response: Response): Promise<string | null> {
@@ -230,15 +214,12 @@ export async function deleteArtifact(collectionName: string): Promise<void> {
   );
 }
 
-export async function getFileStatus(
-  collectionName: string,
-  method = "auto",
-): Promise<FileStatusResponse> {
+export async function getFileStatus(collectionName: string): Promise<FileStatusResponse> {
   let response: Response;
 
   try {
     response = await fetch(
-      `${API_BASE}/file/${encodeURIComponent(collectionName)}/status?method=${encodeURIComponent(method)}`,
+      `${API_BASE}/file/${encodeURIComponent(collectionName)}/status`,
       { method: "GET" },
     );
   } catch (error) {

@@ -25,9 +25,7 @@ export interface ErrorMessage {
 export interface ParseResultMessage {
   type: "result";
   success: boolean;
-  markdown_path?: string | null;
-  json_path?: string | null;
-  image_dir?: string | null;
+  collection_name?: string | null;
   processing_time: number;
   error: string;
   error_code?: string | null;
@@ -38,7 +36,6 @@ export interface ParseResultMessage {
 export interface TranslateResultMessage {
   type: "result";
   success: boolean;
-  translated_markdown_path?: string | null;
   translated_count: number;
   skipped_count: number;
   processing_time: number;
@@ -51,7 +48,6 @@ export interface TranslateResultMessage {
 export interface IndexResultMessage {
   type: "result";
   success: boolean;
-  collection_name?: string | null;
   chunk_count: number;
   processing_time: number;
   error: string;

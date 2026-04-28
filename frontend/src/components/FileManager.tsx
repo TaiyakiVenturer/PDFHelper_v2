@@ -6,7 +6,6 @@ import {
   copyPdfToDataDir,
   deleteArtifact,
   deletePdf,
-  deriveCollectionName,
   isFileServiceError,
   listPdfs,
   type PdfFileItem,
@@ -118,7 +117,7 @@ export function FileManager() {
       try {
         const uploadedFile = await copyPdfToDataDir(sourcePath);
         await refreshFiles();
-        addToast("success", `已上傳 ${uploadedFile.name}`);
+        addToast("success", `已上傳 ${uploadedFile.pdf_name}`);
         return true;
       } catch (error) {
         if (isFileServiceError(error)) {
@@ -243,9 +242,9 @@ export function FileManager() {
     setIsWorking(true);
 
     try {
-      await deletePdf(deleteTarget.name);
+      await deletePdf(deleteTarget.pdf_name);
       await refreshFiles();
-      addToast("success", `已刪除 ${deleteTarget.name}`);
+      addToast("success", `已刪除 ${deleteTarget.pdf_name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "刪除失敗";
       addToast("error", message);
@@ -262,11 +261,9 @@ export function FileManager() {
 
     setIsWorking(true);
 
-    const collectionName = deriveCollectionName(deleteArtifactTarget.name);
-
     try {
-      await deleteArtifact(collectionName);
-      addToast("success", `已刪除 ${deleteArtifactTarget.name} 的輸出`);
+      await deleteArtifact(deleteArtifactTarget.collection_name);
+      addToast("success", `已刪除 ${deleteArtifactTarget.pdf_name} 的輸出`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "刪除輸出失敗";
       addToast("error", message);
@@ -354,8 +351,8 @@ export function FileManager() {
           <p>目前沒有 PDF，請先上傳檔案。</p>
         ) : (
           files.map((file) => (
-            <div key={file.path} className="file-item">
-              <span className="file-name">{file.name}</span>
+            <div key={file.collection_name} className="file-item">
+              <span className="file-name">{file.pdf_name}</span>
               <div className="file-buttons">
                 <button
                   type="button"
@@ -382,7 +379,7 @@ export function FileManager() {
                   className="btn btn-primary"
                   disabled={isWorking || isParsing || isTranslating || isIndexing}
                   onClick={() => {
-                    void startParse(file.path);
+                    void startParse(file.collection_name);
                   }}
                 >
                   {isParsing ? "解析中..." : "解析"}
@@ -392,7 +389,7 @@ export function FileManager() {
                   className="btn btn-primary"
                   disabled={isWorking || isParsing || isTranslating || isIndexing}
                   onClick={() => {
-                    void startTranslate(file.name, file.path);
+                    void startTranslate(file.collection_name);
                   }}
                 >
                   {isTranslating ? "翻譯中..." : "翻譯"}
@@ -402,7 +399,7 @@ export function FileManager() {
                   className="btn btn-primary"
                   disabled={isWorking || isParsing || isTranslating || isIndexing}
                   onClick={() => {
-                    void startIndex(file.name, file.path);
+                    void startIndex(file.collection_name);
                   }}
                 >
                   {isIndexing ? "索引中..." : "索引"}
@@ -418,7 +415,7 @@ export function FileManager() {
         title="刪除檔案"
         message={
           deleteTarget
-            ? `確定要刪除 ${deleteTarget.name} 嗎？此操作無法復原。`
+            ? `確定要刪除 ${deleteTarget.pdf_name} 嗎？此操作無法復原。`
             : ""
         }
         onCancel={() => {
@@ -434,7 +431,7 @@ export function FileManager() {
         title="刪除輸出"
         message={
           deleteArtifactTarget
-            ? `確定要刪除 ${deleteArtifactTarget.name} 的所有輸出資料嗎？此操作無法復原。`
+            ? `確定要刪除 ${deleteArtifactTarget.pdf_name} 的所有輸出資料嗎？此操作無法復原。`
             : ""
         }
         onCancel={() => {

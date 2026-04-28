@@ -6,6 +6,7 @@ export function IndexStatus() {
   const percent = useIndexStore((state) => state.percent);
   const message = useIndexStore((state) => state.message);
   const result = useIndexStore((state) => state.result);
+  const collectionName = useIndexStore((state) => state.collectionName);
   const errorMessage = useIndexStore((state) => state.errorMessage);
 
   if (status === "idle") {
@@ -36,7 +37,7 @@ export function IndexStatus() {
       <section className="parse-status" aria-live="polite">
         <h2 className="panel-title">索引狀態</h2>
         <p className="parse-main">索引完成</p>
-        <p className="parse-sub">collection: {result?.collection_name ?? "-"}</p>
+        <p className="parse-sub">collection: {collectionName ?? "-"}</p>
         <p className="parse-sub">
           切分 {result?.chunk_count ?? 0} 個 chunk，耗時{" "}
           {result?.processing_time.toFixed(2) ?? "0.00"} 秒

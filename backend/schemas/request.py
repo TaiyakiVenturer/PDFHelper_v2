@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class ParseRequest(BaseModel):
-    pdf_path: str
+    collection_name: str
     method: Literal["auto", "txt", "ocr"] = "auto"
     lang: str = "en"
     formula: bool = True
@@ -12,13 +12,15 @@ class ParseRequest(BaseModel):
 
 
 class TranslateRequest(BaseModel):
-    json_path: str
+    collection_name: str
+    method: Literal["auto", "txt", "ocr"] = "auto"
     src_lang: str = "en"
     tgt_lang: str = "chinese_cht"
 
 
 class IndexRequest(BaseModel):
-    json_path: str
+    collection_name: str
+    method: Literal["auto", "txt", "ocr"] = "auto"
 
 
 class QueryRequest(BaseModel):

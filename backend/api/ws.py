@@ -17,7 +17,7 @@ router = APIRouter()
 
 def _parse_orchestrator_kwargs(request: ParseRequest) -> dict[str, Any]:
     return {
-        "pdf_path": request.pdf_path,
+        "collection_name": request.collection_name,
         "method": request.method,
         "lang": request.lang,
         "formula": request.formula,
@@ -27,7 +27,8 @@ def _parse_orchestrator_kwargs(request: ParseRequest) -> dict[str, Any]:
 
 def _translate_orchestrator_kwargs(request: TranslateRequest) -> dict[str, Any]:
     return {
-        "json_path": request.json_path,
+        "collection_name": request.collection_name,
+        "method": request.method,
         "src_lang": request.src_lang,
         "tgt_lang": request.tgt_lang,
     }
@@ -35,7 +36,8 @@ def _translate_orchestrator_kwargs(request: TranslateRequest) -> dict[str, Any]:
 
 def _index_orchestrator_kwargs(request: IndexRequest) -> dict[str, Any]:
     return {
-        "json_path": request.json_path,
+        "collection_name": request.collection_name,
+        "method": request.method,
     }
 
 

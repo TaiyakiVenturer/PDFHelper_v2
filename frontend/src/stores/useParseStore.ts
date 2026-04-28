@@ -7,7 +7,7 @@ import { useToastStore } from "./useToastStore";
 type ParseStatus = "idle" | "parsing" | "done" | "error";
 
 interface ParseRequestPayload {
-  pdf_path: string;
+  collection_name: string;
   method: "auto" | "txt" | "ocr";
   lang: string;
   formula: boolean;
@@ -21,7 +21,7 @@ interface ParseState {
   result: ParseResultMessage | null;
   errorMessage: string | null;
   connection: WsConnection | null;
-  startParse: (pdfPath: string) => Promise<void>;
+  startParse: (collectionName: string) => Promise<void>;
   updateProgress: (percent: number, message: string) => void;
   setResult: (result: ParseResultMessage) => void;
   setError: (errorMessage: string) => void;
@@ -62,7 +62,7 @@ export const useParseStore = create<ParseState>((set, get) => ({
   result: null,
   errorMessage: null,
   connection: null,
-  startParse: async (pdfPath: string) => {
+  startParse: async (collectionName: string) => {
     const { status, connection } = get();
 
     if (status === "parsing") {
@@ -81,7 +81,7 @@ export const useParseStore = create<ParseState>((set, get) => ({
     });
 
     const payload: ParseRequestPayload = {
-      pdf_path: pdfPath,
+      collection_name: collectionName,
       method: "auto",
       lang: "en",
       formula: true,

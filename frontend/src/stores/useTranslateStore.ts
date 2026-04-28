@@ -1,7 +1,6 @@
 import { create } from "zustand";
 
 import {
-  deriveCollectionName,
   getFileStatus,
   isFileServiceError,
 } from "../services/fileService";
@@ -22,7 +21,8 @@ type TranslateStatus =
   | "error";
 
 interface TranslateRequestPayload {
-  json_path: string;
+  collection_name: string;
+  method: "auto" | "txt" | "ocr";
   src_lang: "en";
   tgt_lang: "chinese_cht";
 }
@@ -35,8 +35,9 @@ interface TranslateState {
   errorMessage: string | null;
   connection: WsConnection | null;
   targetFilename: string | null;
-  pendingJsonPath: string | null;
-  startTranslate: (filename: string, filePath: string) => Promise<void>;
+  collectionName: string | null;
+  pendingMethod: string | null;
+  startTranslate: (collectionName: string) => Promise<void>;
   confirmOverwrite: () => void;
   cancelOverwrite: () => void;
   reset: () => void;
@@ -78,17 +79,6 @@ function getFriendlyStageBusyMessage(code?: string | null): string | null {
   return null;
 }
 
-function getFilenameFromPath(path: string): string {
-  const normalized = path.trim();
-  if (!normalized) {
-    return "";
-  }
-
-  const parts = normalized.split(/[/\\]/);
-  return parts[parts.length - 1] || "";
-}
-
-
 function failTranslate(
   set: (
     partial:
@@ -112,10 +102,92 @@ function failTranslate(
     errorMessage: displayMessage,
     message: "",
     connection: null,
-    pendingJsonPath: null,
+    pendingMethod: null,
   });
 
   useToastStore.getState().addToast("error", displayMessage);
+}
+
+function startWebSocketTranslate(
+  collectionName: string,
+  method: string,
+  set: (partial: Partial<TranslateState> | ((state: TranslateState) => Partial<TranslateState>)) => void,
+  get: () => TranslateState,
+): void {
+  let wsConnection: WsConnection | null = null;
+
+  const payload: TranslateRequestPayload = {
+    collection_name: collectionName,
+    method: method as "auto" | "txt" | "ocr",
+    src_lang: "en",
+    tgt_lang: "chinese_cht",
+  };
+
+  wsConnection = connectWs<TranslateResultMessage>(getTranslateWsUrl(), payload, {
+    onProgress: (progress: ProgressMessage) => {
+      set({
+        status: "translating",
+        percent: clampPercent(progress.percent),
+        message: progress.message,
+        connection: wsConnection,
+      });
+    },
+    onResult: (result: TranslateResultMessage) => {
+      if (!result.success) {
+        set({ result });
+        failTranslate(
+          set,
+          get,
+          result.error || "翻譯失敗",
+          result.error_code || null,
+          result.retryable ?? false,
+        );
+        wsConnection?.close();
+        return;
+      }
+
+      set({
+        status: "done",
+        percent: 100,
+        message: "翻譯完成",
+        result,
+        errorMessage: null,
+        connection: null,
+        pendingMethod: null,
+      });
+
+      useToastStore
+        .getState()
+        .addToast(
+          "success",
+          `翻譯完成，處理 ${result.translated_count} 段，耗時 ${result.processing_time.toFixed(2)} 秒`,
+        );
+
+      wsConnection?.close();
+    },
+    onError: (error: ErrorMessage) => {
+      failTranslate(set, get, getErrorMessage(error), error.code || null, error.retryable);
+    },
+    onClose: () => {
+      const current = get();
+
+      if (current.status === "translating") {
+        failTranslate(set, get, "與翻譯服務的連線已中斷", null);
+        return;
+      }
+
+      set({ connection: null });
+    },
+  });
+
+  set({
+    status: "translating",
+    percent: 0,
+    message: "翻譯準備中...",
+    errorMessage: null,
+    connection: wsConnection,
+    pendingMethod: null,
+  });
 }
 
 export const useTranslateStore = create<TranslateState>((set, get) => ({
@@ -126,8 +198,9 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
   errorMessage: null,
   connection: null,
   targetFilename: null,
-  pendingJsonPath: null,
-  startTranslate: async (filename: string, filePath: string) => {
+  collectionName: null,
+  pendingMethod: null,
+  startTranslate: async (collectionName: string) => {
     const { status, connection } = get();
 
     if (
@@ -140,15 +213,6 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
 
     connection?.close();
 
-    const fallbackName = getFilenameFromPath(filePath);
-    const targetName = filename.trim() || fallbackName;
-    const collectionName = deriveCollectionName(targetName);
-
-    if (!collectionName) {
-      failTranslate(set, get, "無法判斷檔案名稱，請重新選擇檔案");
-      return;
-    }
-
     set({
       status: "checking",
       percent: 0,
@@ -156,13 +220,14 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
       result: null,
       errorMessage: null,
       connection: null,
-      targetFilename: targetName,
-      pendingJsonPath: null,
+      targetFilename: collectionName,
+      collectionName,
+      pendingMethod: null,
     });
 
     let statusResponse;
     try {
-      statusResponse = await getFileStatus(collectionName, "auto");
+      statusResponse = await getFileStatus(collectionName);
     } catch (error) {
       if (isFileServiceError(error)) {
         failTranslate(set, get, error.message, null);
@@ -178,190 +243,33 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
       return;
     }
 
-    if (statusResponse.stage === "none") {
+    if (!statusResponse.is_parsed || !statusResponse.parse_method) {
       failTranslate(set, get, "檔案尚未解析，請先執行解析", null);
       return;
     }
 
-    const parseJsonPath = statusResponse.json_path;
+    const method = statusResponse.parse_method;
 
-    if (!parseJsonPath) {
-      failTranslate(set, get, "找不到解析結果，請先解析該檔案", null);
-      return;
-    }
-
-    if (
-      statusResponse.stage === "translated" ||
-      statusResponse.stage === "indexed"
-    ) {
+    if (statusResponse.is_translated || statusResponse.is_indexed) {
       set({
         status: "awaitingConfirm",
         message: "檔案已有翻譯結果，等待覆寫確認",
-        pendingJsonPath: parseJsonPath,
+        pendingMethod: method,
       });
       return;
     }
 
-    const startWebSocketTranslate = (jsonPath: string): void => {
-      let wsConnection: WsConnection | null = null;
-
-      const payload: TranslateRequestPayload = {
-        json_path: jsonPath,
-        src_lang: "en",
-        tgt_lang: "chinese_cht",
-      };
-
-      wsConnection = connectWs<TranslateResultMessage>(getTranslateWsUrl(), payload, {
-        onProgress: (progress: ProgressMessage) => {
-          set({
-            status: "translating",
-            percent: clampPercent(progress.percent),
-            message: progress.message,
-            connection: wsConnection,
-          });
-        },
-        onResult: (result: TranslateResultMessage) => {
-          if (!result.success) {
-            set({ result });
-            failTranslate(
-              set,
-              get,
-              result.error || "翻譯失敗",
-              result.error_code || null,
-              result.retryable ?? false,
-            );
-            wsConnection?.close();
-            return;
-          }
-
-          set({
-            status: "done",
-            percent: 100,
-            message: "翻譯完成",
-            result,
-            errorMessage: null,
-            connection: null,
-            pendingJsonPath: null,
-          });
-
-          useToastStore
-            .getState()
-            .addToast(
-              "success",
-              `翻譯完成，處理 ${result.translated_count} 段，耗時 ${result.processing_time.toFixed(2)} 秒`,
-            );
-
-          wsConnection?.close();
-        },
-        onError: (error: ErrorMessage) => {
-          failTranslate(set, get, getErrorMessage(error), error.code || null, error.retryable);
-        },
-        onClose: () => {
-          const current = get();
-
-          if (current.status === "translating") {
-            failTranslate(set, get, "與翻譯服務的連線已中斷", null);
-            return;
-          }
-
-          set({ connection: null });
-        },
-      });
-
-      set({
-        status: "translating",
-        percent: 0,
-        message: "翻譯準備中...",
-        errorMessage: null,
-        connection: wsConnection,
-        pendingJsonPath: null,
-      });
-    };
-
-    startWebSocketTranslate(parseJsonPath);
+    startWebSocketTranslate(collectionName, method, set, get);
   },
   confirmOverwrite: () => {
     const current = get();
 
-    if (current.status !== "awaitingConfirm" || !current.pendingJsonPath) {
+    if (current.status !== "awaitingConfirm" || !current.collectionName || !current.pendingMethod) {
       return;
     }
 
-    const jsonPath = current.pendingJsonPath;
-    set({
-      status: "translating",
-      percent: 0,
-      message: "翻譯準備中...",
-      errorMessage: null,
-      pendingJsonPath: null,
-    });
-
-    let wsConnection: WsConnection | null = null;
-
-    const payload: TranslateRequestPayload = {
-      json_path: jsonPath,
-      src_lang: "en",
-      tgt_lang: "chinese_cht",
-    };
-
-    wsConnection = connectWs<TranslateResultMessage>(getTranslateWsUrl(), payload, {
-      onProgress: (progress: ProgressMessage) => {
-        set({
-          status: "translating",
-          percent: clampPercent(progress.percent),
-          message: progress.message,
-          connection: wsConnection,
-        });
-      },
-      onResult: (result: TranslateResultMessage) => {
-        if (!result.success) {
-          set({ result });
-          failTranslate(
-            set,
-            get,
-            result.error || "翻譯失敗",
-            result.error_code || null,
-            result.retryable ?? false,
-          );
-          wsConnection?.close();
-          return;
-        }
-
-        set({
-          status: "done",
-          percent: 100,
-          message: "翻譯完成",
-          result,
-          errorMessage: null,
-          connection: null,
-          pendingJsonPath: null,
-        });
-
-        useToastStore
-          .getState()
-          .addToast(
-            "success",
-            `翻譯完成，處理 ${result.translated_count} 段，耗時 ${result.processing_time.toFixed(2)} 秒`,
-          );
-
-        wsConnection?.close();
-      },
-      onError: (error: ErrorMessage) => {
-        failTranslate(set, get, getErrorMessage(error), error.code || null, error.retryable);
-      },
-      onClose: () => {
-        const currentState = get();
-
-        if (currentState.status === "translating") {
-          failTranslate(set, get, "與翻譯服務的連線已中斷", null);
-          return;
-        }
-
-        set({ connection: null });
-      },
-    });
-
-    set({ connection: wsConnection });
+    const { collectionName, pendingMethod } = current;
+    startWebSocketTranslate(collectionName, pendingMethod, set, get);
   },
   cancelOverwrite: () => {
     get().connection?.close();
@@ -372,8 +280,9 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
       result: null,
       errorMessage: null,
       connection: null,
-      pendingJsonPath: null,
+      pendingMethod: null,
       targetFilename: null,
+      collectionName: null,
     });
   },
   reset: () => {
@@ -386,7 +295,8 @@ export const useTranslateStore = create<TranslateState>((set, get) => ({
       errorMessage: null,
       connection: null,
       targetFilename: null,
-      pendingJsonPath: null,
+      collectionName: null,
+      pendingMethod: null,
     });
   },
 }));
