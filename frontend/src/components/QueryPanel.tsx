@@ -29,6 +29,7 @@ export function QueryPanel({ collectionName }: QueryPanelProps) {
   const errorMessage = useQueryStore((state) => state.errorMessage);
   const result = useQueryStore((state) => state.result);
   const submitQuery = useQueryStore((state) => state.submitQuery);
+  const setScrollTarget = useQueryStore((state) => state.setScrollTarget);
   const reset = useQueryStore((state) => state.reset);
 
   const isBusy =
@@ -121,7 +122,7 @@ export function QueryPanel({ collectionName }: QueryPanelProps) {
 
       {sources.length > 0 && (
         <div className="query-section">
-          <p className="query-label">檢索來源 ({sources.length})</p>
+          <p className="query-label">回答參考 ({sources.length})</p>
           <div className="query-sources">
             {sources.map((src) => (
               <details key={src.chunk_id} className="query-source-item">
@@ -130,8 +131,28 @@ export function QueryPanel({ collectionName }: QueryPanelProps) {
                     {src.section_title || "（無標題）"}
                   </span>
                   <span className="query-source-page">第 {src.page_idx + 1} 頁</span>
+                  {src.section_title && (
+                    <button
+                      type="button"
+                      className="query-source-jump-btn"
+                      title="跳至文件對應段落"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setScrollTarget(src.section_title, src.page_idx, src.text);
+                      }}
+                    >
+                      ↗
+                    </button>
+                  )}
                 </summary>
-                <div className="query-source-detail">{src.text}</div>
+                <div className="query-source-detail">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={[rehypeRaw, rehypeKatex]}
+                  >
+                    {src.text}
+                  </ReactMarkdown>
+                </div>
               </details>
             ))}
           </div>
@@ -140,7 +161,7 @@ export function QueryPanel({ collectionName }: QueryPanelProps) {
 
       {(answer || status === "retrieving") && (
         <div className="query-section">
-          <p className="query-label">答案</p>
+          <p className="query-label">AI 回答</p>
           <div
             ref={answerRef}
             className={`query-answer${status === "generating" ? " query-answer-generating" : ""}`}
@@ -152,7 +173,7 @@ export function QueryPanel({ collectionName }: QueryPanelProps) {
                 remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeRaw, rehypeKatex]}
               >
-                {answer}
+                {answer.replace(/(\*{1,2}) +/g, "$1")}
               </ReactMarkdown>
             )}
           </div>

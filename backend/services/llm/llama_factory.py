@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import logging
 from pathlib import Path
+import time
 from typing import Any
 from typing import Iterator
 from typing import Sequence
@@ -10,30 +11,18 @@ from typing import Sequence
 from schemas.response import QuerySourceItem
 from services.translator import translator_config as cfg
 
-try:
-    from huggingface_hub import hf_hub_download
-except ImportError:  # pragma: no cover
-    hf_hub_download = None
-
-try:
-    from llama_cpp import Llama
-except ImportError:  # pragma: no cover
-    Llama = None
-
-try:
-    import torch
-except ImportError:  # pragma: no cover
-    torch = None
-
 logger = logging.getLogger(__name__)
 
 QUERY_SYSTEM_PROMPT = (
     "You are an academic paper assistant. "
     "Answer questions strictly based on provided source passages. "
     "If the sources are insufficient, explicitly say what is missing. "
-    "Use the same language as the user's question."
-    "Source format: [Source N] (page X, section Y) <source text>; "
-    "Make sure to think step by step based on the sources (especially the section titles), and provide detailed answers. "
+    "Use the same language as the user's question. "
+    "Each source is formatted as: [Source N] Page X | Section: <section title>, followed by the source text. "
+    "The section title tells you what topic the source belongs to — use it to understand context. "
+    "Think step by step based on both the section titles and the source text, and provide detailed answers. "
+    "Math formatting rules: wrap inline mathematical symbols or variables with single dollar signs, e.g. $x$, $\\alpha$; "
+    "wrap standalone equations or multi-term formulas with double dollar signs on their own line, e.g. $$E = mc^2$$."
 )
 
 
@@ -49,7 +38,9 @@ def ensure_model_ready(
     if model_path.exists():
         return model_path
 
-    if hf_hub_download is None:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
         raise RuntimeError(
             "huggingface_hub 未安裝，無法自動下載模型。請先安裝 huggingface-hub。"
         )
@@ -92,7 +83,9 @@ class LlamaFactory:
             logger.warning("模型已載入，跳過重複載入")
             return self
 
-        if Llama is None:
+        try:
+            from llama_cpp import Llama
+        except ImportError:
             raise RuntimeError(
                 "llama-cpp-python 未安裝，無法載入模型。請先安裝 llama-cpp-python。"
             )
@@ -102,14 +95,15 @@ class LlamaFactory:
             repo_id=self.repo_id,
             filename=self.filename,
         )
-        logger.info("正在載入模型: %s", model_path)
+        logger.info("[llm] 開始載入模型: %s", model_path.name)
+        t0 = time.perf_counter()
         self._llm = Llama(
             model_path=str(model_path),
             n_gpu_layers=self.n_gpu_layers,
             n_ctx=self.n_ctx,
             verbose=self.verbose,
         )
-        logger.info("模型載入完成")
+        logger.info("[llm] 模型載入完成 (%.2fs)", time.perf_counter() - t0)
         return self
 
     def __exit__(
@@ -123,8 +117,12 @@ class LlamaFactory:
             self._llm = None
 
         gc.collect()
-        if torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except ImportError:  # pragma: no cover
+            pass
 
         logger.info("模型已卸載，VRAM 已釋放")
         return False
@@ -168,10 +166,10 @@ class LlamaFactory:
 def _build_sources_block(sources: Sequence[QuerySourceItem]) -> str:
     blocks: list[str] = []
     for index, source in enumerate(sources, start=1):
-        blocks.append(
-            f"[Source {index}] (page {source.page_idx}, {source.section_title})\n"
-            f"{source.text}"
-        )
+        header = f"[Source {index}] Page {source.page_idx + 1}"
+        if source.section_title.strip():
+            header += f" | Section: {source.section_title.strip()}"
+        blocks.append(f"{header}\n{source.text}")
     return "\n\n".join(blocks)
 
 

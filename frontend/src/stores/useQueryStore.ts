@@ -42,7 +42,9 @@ interface QueryState {
   errorMessage: string | null;
   result: QueryResult | null;
   connection: WsConnection | null;
+  scrollTarget: { sectionTitle: string; pageIdx: number; chunkText: string } | null;
   submitQuery: (question: string, collectionName: string) => Promise<void>;
+  setScrollTarget: (sectionTitle: string, pageIdx: number, chunkText: string) => void;
   reset: () => void;
 }
 
@@ -105,6 +107,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
   errorMessage: null,
   result: null,
   connection: null,
+  scrollTarget: null,
   submitQuery: async (question: string, collectionName: string) => {
     if (!question.trim()) {
       useToastStore.getState().addToast("warning", "請輸入問題後再送出");
@@ -204,6 +207,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
 
     set({ connection: wsConnection });
   },
+  setScrollTarget: (sectionTitle, pageIdx, chunkText) => set({ scrollTarget: { sectionTitle, pageIdx, chunkText } }),
   reset: () => {
     get().connection?.close();
     set({
@@ -215,6 +219,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
       errorMessage: null,
       result: null,
       connection: null,
+      scrollTarget: null,
     });
   },
 }));

@@ -3,20 +3,11 @@ from __future__ import annotations
 import gc
 import logging
 import math
+import time
 from typing import Any
 from typing import Callable
 
 from services.indexer import indexer_config as cfg
-
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError:  # pragma: no cover
-    SentenceTransformer = None
-
-try:
-    import torch
-except ImportError:  # pragma: no cover
-    torch = None
 
 
 logger = logging.getLogger(__name__)
@@ -26,31 +17,22 @@ class BgeM3Embedder:
     def __init__(self, batch_size: int = cfg.EMBEDDING_BATCH_SIZE) -> None:
         self.batch_size = batch_size
         self._model: Any | None = None
-        self._using_cuda = False
 
     def load(self) -> None:
         if self._model is not None:
             return
 
-        if SentenceTransformer is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
             raise RuntimeError(
                 "sentence-transformers is not installed; cannot load bge-m3"
             )
 
-        device = cfg.EMBEDDING_DEVICE
-        if device not in {"cpu", "cuda"}:
-            raise ValueError(f"Unsupported embedding device: {device}")
-
-        if device == "cuda" and (torch is None or not torch.cuda.is_available()):
-            device = "cpu"
-            logger.warning(
-                "CUDA is unavailable; BgeM3Embedder falling back to CPU"
-            )
-
-        logger.info("BgeM3Embedder loading on device=%s", device)
-
-        self._using_cuda = device == "cuda"
-        self._model = SentenceTransformer(cfg.HF_REPO_ID, device=device)
+        logger.info("[embedder] 開始載入 bge-m3 (device=cpu)")
+        t0 = time.perf_counter()
+        self._model = SentenceTransformer(cfg.HF_REPO_ID, device="cpu")
+        logger.info("[embedder] bge-m3 載入完成 (%.2fs)", time.perf_counter() - t0)
 
     def unload(self) -> None:
         if self._model is not None:
@@ -58,11 +40,7 @@ class BgeM3Embedder:
             self._model = None
 
         gc.collect()
-        if self._using_cuda and torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        self._using_cuda = False
-        logger.info("BgeM3Embedder unloaded")
+        logger.info("[embedder] bge-m3 已卸載")
 
     def __enter__(self) -> "BgeM3Embedder":
         self.load()

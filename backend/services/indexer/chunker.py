@@ -152,7 +152,7 @@ class StructureAwareChunker:
                     "page_idx": int(item.page_idx),
                     "type_v2": "equation_interline",
                     "section_title": section_title,
-                    "text": math_latex,
+                    "text": f"$$\n{math_latex}\n$$",
                     "math_latex": math_latex,
                 },
             )
