@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
 
 
@@ -14,10 +13,6 @@ MATH_SEGMENT_PATTERN = re.compile(
     r"(?<!\\)\$\$(?:.|\n)+?(?<!\\)\$\$|(?<!\\)\$(?!\$)(?:[^$\\\n]|\\.)*?(?<!\\)\$"
 )
 PLACEHOLDER_PATTERN = re.compile(r"__EQ_\d{4}__")
-
-HF_REPO_ID = "bartowski/Qwen2.5-7B-Instruct-GGUF"
-HF_FILENAME = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[3] / "models"
 
 TRANSLATION_SYSTEM_PROMPT = (
     "You are a professional translation engine. "

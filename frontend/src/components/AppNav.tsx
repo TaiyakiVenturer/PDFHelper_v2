@@ -21,6 +21,12 @@ export function AppNav() {
       >
         查詢 / 閱覽
       </NavLink>
+      <NavLink
+        to="/settings"
+        className={({ isActive }) => `nav-tab${isActive ? " nav-tab-active" : ""}`}
+      >
+        設定
+      </NavLink>
     </nav>
   );
 }

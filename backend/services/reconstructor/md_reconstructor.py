@@ -73,8 +73,10 @@ class MarkdownReconstructor:
                 return self._render_image(item)
             case "list":
                 return self._render_list(item)
-            case "code" | "algorithm":
+            case "code":
                 return self._render_code(item)
+            case "algorithm":
+                return self._render_algorithm(item)
             case "page_header" | "page_footer" | "page_number":
                 return ""
             case _:
@@ -175,7 +177,58 @@ class MarkdownReconstructor:
             if row != "":
                 rows.append(row)
 
-        return "\n".join(rows)
+        return "\n\n".join(rows)
+
+    _ALGORITHM_KEYWORDS = re.compile(
+        r'\b(for|if|else|then|do|end|repeat|until|while|return|break|to|not|and|or)\b'
+    )
+
+    def _render_algorithm(self, item: dict) -> str:
+        code_body = item.get("code_body")
+        if not isinstance(code_body, str) or code_body.strip() == "":
+            return ""
+
+        rendered: list[str] = []
+        first_content = True
+
+        for raw_line in code_body.split("\n"):
+            line = raw_line.rstrip()
+            if line == "":
+                rendered.append(">")
+                continue
+
+            if first_content:
+                first_content = False
+                rendered.append(f"> **{line}**")
+                rendered.append(">")
+                continue
+
+            io_match = re.match(r'^(Input|Output):(.*)', line)
+            if io_match:
+                label = io_match.group(1)
+                rest = io_match.group(2).strip()
+                rendered.append(f"> **{label}:** {rest}  ")
+                continue
+
+            num_match = re.match(r'^(\d+)\s+(.*)', line)
+            if num_match:
+                num = num_match.group(1)
+                rest = self._bold_keywords(num_match.group(2))
+                rendered.append(f"> `{num}` {rest}  ")
+            else:
+                rendered.append(f"> {line}  ")
+
+        block = "\n".join(rendered)
+        caption = self._join_text_list(item.get("caption"))
+        if caption:
+            return "\n\n".join([caption, block])
+        return block
+
+    def _bold_keywords(self, text: str) -> str:
+        def replacer(m: re.Match) -> str:
+            kw = m.group(0)
+            return f"**{kw}**"
+        return self._ALGORITHM_KEYWORDS.sub(replacer, text)
 
     def _render_code(self, item: dict) -> str:
         code_body = item.get("code_body")

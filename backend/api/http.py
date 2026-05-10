@@ -1,20 +1,81 @@
 import asyncio
+import logging
 import re
+from typing import Any
 
 from fastapi import APIRouter
+from fastapi import Body
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 from api.deps import get_orchestrator
+from schemas.config import AppConfig
 from schemas.request import UploadFileRequest
 from schemas.response import DeleteResponse
 from schemas.response import FileItem
 from schemas.response import FileListResponse
 from schemas.response import FileStatusResponse
+from core.config import config
+from services.llm.base import DEFAULT_MODELS_DIR
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class LocalModelsResponse(BaseModel):
+    files: list[str]
+
+
+class ProbeRequest(BaseModel):
+    base_url: str
+    api_key: str = "sk-no-key"
+
+
+class ProbeResponse(BaseModel):
+    ok: bool
+    models: list[str]
+    error: str | None = None
+
+
+@router.get("/settings", response_model=AppConfig)
+async def get_settings() -> AppConfig:
+    return config.get_config()
+
+
+@router.put("/settings", response_model=AppConfig)
+async def update_settings(cfg: AppConfig = Body(...)) -> AppConfig:
+    config.save_config(cfg)
+    return cfg
+
+
+@router.get("/settings/models/local", response_model=LocalModelsResponse)
+async def get_local_models() -> LocalModelsResponse:
+    if not DEFAULT_MODELS_DIR.exists():
+        return LocalModelsResponse(files=[])
+    files = sorted(p.name for p in DEFAULT_MODELS_DIR.glob("*.gguf") if p.is_file())
+    return LocalModelsResponse(files=files)
+
+
+@router.post("/settings/probe", response_model=ProbeResponse)
+async def probe_remote(req: ProbeRequest) -> ProbeResponse:
+    return await asyncio.to_thread(_do_probe, req.base_url, req.api_key)
+
+
+def _do_probe(base_url: str, api_key: str) -> ProbeResponse:
+    try:
+        from openai import OpenAI  # noqa: PLC0415
+
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        models_page = client.models.list()
+        model_ids = sorted(m.id for m in models_page.data)
+        return ProbeResponse(ok=True, models=model_ids)
+    except Exception as exc:
+        logger.debug("probe 失敗: %s", exc)
+        return ProbeResponse(ok=False, models=[], error=str(exc))
 
 
 @router.get("/file/{collection_name}/markdown", response_class=PlainTextResponse)

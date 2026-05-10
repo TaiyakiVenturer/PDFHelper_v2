@@ -1,7 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
 import logging
-from pathlib import Path
 import time
 
 logging.basicConfig(
@@ -17,11 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from api.http import router as http_router
 from api.query import router as query_router
 from api.ws import router as ws_router
+from core.paths import DATA_DIR
 
 HOST = "127.0.0.1"
 PORT = 8080
 
-_ARTIFACTS_DIR = str((Path(__file__).resolve().parent.parent / "data" / "artifacts").resolve())
+_ARTIFACTS_DIR = str(DATA_DIR / "artifacts")
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ def _prewarm_imports() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("[paths] Data location: %s", DATA_DIR)
     asyncio.create_task(asyncio.to_thread(_prewarm_imports))
     yield
 

@@ -9,7 +9,7 @@ from typing import Mapping
 from typing import Sequence
 
 from services.llm.llama_factory import LlamaFactory
-from services.translator import translator_config as cfg
+from services.translator import translator_prompts as cfg
 
 logger = logging.getLogger(__name__)
 

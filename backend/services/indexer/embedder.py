@@ -7,14 +7,16 @@ import time
 from typing import Any
 from typing import Callable
 
-from services.indexer import indexer_config as cfg
-
 
 logger = logging.getLogger(__name__)
 
 
+EMBEDDING_BATCH_SIZE = 4
+HF_REPO_ID = "BAAI/bge-m3"
+
+
 class BgeM3Embedder:
-    def __init__(self, batch_size: int = cfg.EMBEDDING_BATCH_SIZE) -> None:
+    def __init__(self, batch_size: int = EMBEDDING_BATCH_SIZE) -> None:
         self.batch_size = batch_size
         self._model: Any | None = None
 
@@ -31,7 +33,7 @@ class BgeM3Embedder:
 
         logger.info("[embedder] 開始載入 bge-m3 (device=cpu)")
         t0 = time.perf_counter()
-        self._model = SentenceTransformer(cfg.HF_REPO_ID, device="cpu")
+        self._model = SentenceTransformer(HF_REPO_ID, device="cpu")
         logger.info("[embedder] bge-m3 載入完成 (%.2fs)", time.perf_counter() - t0)
 
     def unload(self) -> None:

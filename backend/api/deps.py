@@ -1,7 +1,6 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
-from pathlib import Path
 from typing import Any
 from typing import TypeVar
 
@@ -10,13 +9,16 @@ from pydantic import BaseModel
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
+from core.config import config
+from core.paths import DATA_DIR
 from services.orchestrator import PipelineOrchestrator
 from services.error_utils import build_error_message
 from schemas.response import ProgressMessage
 
 REQUEST_PAYLOAD_TIMEOUT_SEC = 10.0
 
-_DATA_DIR = str((Path(__file__).resolve().parents[2] / "data").resolve())
+_DATA_DIR = str(DATA_DIR)
+config.init(_DATA_DIR)
 _ORCHESTRATOR = PipelineOrchestrator(data_dir=_DATA_DIR)
 RequestT = TypeVar("RequestT", bound=BaseModel)
 ResultT = TypeVar("ResultT", bound=BaseModel)

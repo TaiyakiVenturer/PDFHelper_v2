@@ -55,6 +55,36 @@ function getQueryWsUrl(): string {
   return `${baseWsUrl.replace(/\/+$/, "")}/ws/query`;
 }
 
+// Delta throttle — accumulate chunks and commit to state at most every FLUSH_MS.
+// This decouples WS receive rate from React render rate, preventing O(n²) re-renders
+// when the model streams many small tokens quickly.
+const FLUSH_MS = 50;
+let _deltaBuffer = "";
+let _flushTimer: ReturnType<typeof setInterval> | null = null;
+let _commitFn: ((text: string) => void) | null = null;
+
+function startDeltaFlush(commit: (text: string) => void): void {
+  _commitFn = commit;
+  if (_flushTimer !== null) return;
+  _flushTimer = setInterval(() => {
+    if (_deltaBuffer && _commitFn) {
+      _commitFn(_deltaBuffer);
+      _deltaBuffer = "";
+    }
+  }, FLUSH_MS);
+}
+
+function stopDeltaFlush(): string {
+  if (_flushTimer !== null) {
+    clearInterval(_flushTimer);
+    _flushTimer = null;
+  }
+  _commitFn = null;
+  const remaining = _deltaBuffer;
+  _deltaBuffer = "";
+  return remaining;
+}
+
 function getErrorMessage(error: ErrorMessage): string {
   if (error.detail) {
     return `${error.message} (${error.detail})`;
@@ -119,6 +149,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
       return;
     }
 
+    stopDeltaFlush();
     connection?.close();
 
     set({
@@ -174,23 +205,30 @@ export const useQueryStore = create<QueryState>((set, get) => ({
           });
         },
         onDelta: (message: QueryDeltaMessage) => {
-          set((state) => ({ answer: state.answer + message.delta }));
+          _deltaBuffer += message.delta;
+          startDeltaFlush((text) => {
+            set((state) => ({ answer: state.answer + text }));
+          });
         },
         onDone: (message: QueryDoneMessage) => {
-          set({
+          const remaining = stopDeltaFlush();
+          set((state) => ({
             status: "done",
+            answer: state.answer + remaining,
             result: {
               answer: message.answer,
               processing_time: message.processing_time,
             },
             connection: null,
-          });
+          }));
           wsConnection?.close();
         },
         onError: (error: ErrorMessage) => {
+          stopDeltaFlush();
           failQuery(set, get, getErrorMessage(error), error.code ?? null, error.retryable);
         },
         onClose: () => {
+          stopDeltaFlush();
           const current = get();
           if (
             current.status === "retrieving" ||
@@ -209,6 +247,7 @@ export const useQueryStore = create<QueryState>((set, get) => ({
   },
   setScrollTarget: (sectionTitle, pageIdx, chunkText) => set({ scrollTarget: { sectionTitle, pageIdx, chunkText } }),
   reset: () => {
+    stopDeltaFlush();
     get().connection?.close();
     set({
       status: "idle",

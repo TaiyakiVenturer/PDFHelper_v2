@@ -30,9 +30,11 @@ from services.error_utils import classify_error_message
 from services.parser import content_merger
 from services.parser.mineru import MinerUCLIWrapper
 from services.reconstructor.md_reconstructor import MarkdownReconstructor
+from core.config import config
 from services.translator.model_translator import ModelTranslator
-from services.llm.llama_factory import LlamaFactory
-from services.llm.llama_factory import build_query_messages
+from services.llm.base import build_query_messages
+from services.llm.base import create_llm_factory
+from services.llm.base import rewrite_query
 from services.indexer.chroma_service import ChromaService
 from services.indexer.chunker import StructureAwareChunker
 from services.indexer.embedder import BgeM3Embedder
@@ -60,8 +62,6 @@ class PipelineOrchestrator:
         os.makedirs(self._chroma_dir, exist_ok=True)
 
         self._mineru_wrapper = MinerUCLIWrapper(output_dir=self._artifacts_dir)
-        self._llm_factory = LlamaFactory()
-        self._translate_service = ModelTranslator(llm_factory=self._llm_factory)
         self._md_reconstructor = MarkdownReconstructor()
         self._embedder = BgeM3Embedder()
         self._chroma_service = ChromaService(persist_dir=self._chroma_dir)
@@ -416,7 +416,9 @@ class PipelineOrchestrator:
 
             _CHECKPOINT_EVERY = 5
 
-            with self._translate_service as translator:
+            llm_cfg = config.get_config().llm
+            _factory = create_llm_factory(llm_cfg)
+            with ModelTranslator(llm_factory=_factory) as translator:
                 for index in range(start_index, len(source_data)):
                     raw_item = source_data[index]
                     if not isinstance(raw_item, dict):
@@ -677,75 +679,76 @@ class PipelineOrchestrator:
                 )
                 return
 
-            progress_callback(10.0, "問題向量化中")
-            self._embedder.load()
-            query_vectors = self._embedder.embed_texts([question])
-            if len(query_vectors) == 0:
-                raise RuntimeError("query embedding result is empty")
+            llm_cfg = config.get_config().llm
+            with create_llm_factory(llm_cfg) as llm:
+                progress_callback(10.0, "重寫查詢字串")
+                try:
+                    search_query = rewrite_query(question, llm)
+                    logger.info("query rewrite: %r → %r", question, search_query)
+                except Exception as rw_err:
+                    logger.warning("query rewrite failed, using original: %s", rw_err)
+                    search_query = question
 
-            query_vector = query_vectors[0]
-            collection = self._chroma_service.get_collection(collection_name)
+                progress_callback(20.0, "問題向量化中")
+                self._embedder.load()
+                query_vectors = self._embedder.embed_texts([search_query])
+                if len(query_vectors) == 0:
+                    raise RuntimeError("query embedding result is empty")
 
-            progress_callback(20.0, "檢索相關段落中")
-            query_result = collection.query(
-                query_embeddings=[query_vector],
-                n_results=top_k,
-                include=["documents", "metadatas", "distances"],
-            )
+                query_vector = query_vectors[0]
+                collection = self._chroma_service.get_collection(collection_name)
 
-            meta_rows = query_result.get("metadatas") or [[]]
-            doc_rows = query_result.get("documents") or [[]]
-            metadatas = meta_rows[0] if meta_rows else []
-            documents = doc_rows[0] if doc_rows else []
-
-            source_items: list[QuerySourceItem] = []
-            for index, metadata in enumerate(metadatas):
-                current_metadata = metadata if isinstance(metadata, dict) else {}
-                fallback_doc = ""
-                if index < len(documents):
-                    fallback_doc = str(documents[index] or "")
-
-                source_items.append(
-                    QuerySourceItem(
-                        page_idx=self._normalize_int(current_metadata.get("page_idx"), default=0),
-                        type_v2=str(current_metadata.get("type_v2", "") or ""),
-                        text=str(current_metadata.get("text", "") or fallback_doc),
-                        section_title=str(current_metadata.get("section_title", "") or ""),
-                        chunk_id=str(current_metadata.get("chunk_id", "") or ""),
-                    )
+                progress_callback(30.0, "檢索相關段落中")
+                query_result = collection.query(
+                    query_embeddings=[query_vector],
+                    n_results=top_k,
+                    include=["documents", "metadatas", "distances"],
                 )
 
-            yield QuerySourcesMessage(sources=source_items)
+                meta_rows = query_result.get("metadatas") or [[]]
+                doc_rows = query_result.get("documents") or [[]]
+                metadatas = meta_rows[0] if meta_rows else []
+                documents = doc_rows[0] if doc_rows else []
 
-            progress_callback(35.0, "組裝提示詞")
-            messages = build_query_messages(
-                question=question,
-                sources=source_items,
-                history=history,
-            )
+                source_items: list[QuerySourceItem] = []
+                for index, metadata in enumerate(metadatas):
+                    current_metadata = metadata if isinstance(metadata, dict) else {}
+                    fallback_doc = ""
+                    if index < len(documents):
+                        fallback_doc = str(documents[index] or "")
 
-            progress_callback(45.0, "生成回答中")
-            answer_parts: list[str] = []
-            with self._llm_factory as llm:
+                    source_items.append(
+                        QuerySourceItem(
+                            page_idx=self._normalize_int(current_metadata.get("page_idx"), default=0),
+                            type_v2=str(current_metadata.get("type_v2", "") or ""),
+                            text=str(current_metadata.get("text", "") or fallback_doc),
+                            section_title=str(current_metadata.get("section_title", "") or ""),
+                            chunk_id=str(current_metadata.get("chunk_id", "") or ""),
+                        )
+                    )
+
+                yield QuerySourcesMessage(sources=source_items)
+
+                progress_callback(45.0, "組裝提示詞")
+                messages = build_query_messages(
+                    question=question,
+                    sources=source_items,
+                    history=history,
+                    history_turns=llm_cfg.query_history_turns,
+                )
+
+                progress_callback(55.0, "生成回答中")
+                answer_parts: list[str] = []
                 stream = llm.create_chat_completion_stream(
                     messages=messages,
-                    max_tokens=800,
-                    temperature=0.3,
+                    max_tokens=llm_cfg.max_tokens,
+                    temperature=llm_cfg.temperature,
                 )
                 for chunk in stream:
-                    choices = chunk.get("choices") or []
-                    if not choices:
+                    if not chunk.delta:
                         continue
-                    first_choice = choices[0] if isinstance(choices[0], dict) else {}
-                    delta = first_choice.get("delta")
-                    if not isinstance(delta, dict):
-                        continue
-                    delta_text = str(delta.get("content", "") or "")
-                    if delta_text == "":
-                        continue
-
-                    answer_parts.append(delta_text)
-                    yield QueryDeltaMessage(delta=delta_text)
+                    answer_parts.append(chunk.delta)
+                    yield QueryDeltaMessage(delta=chunk.delta)
 
             full_answer = "".join(answer_parts)
             progress_callback(100.0, "回答完成")
@@ -780,7 +783,7 @@ class PipelineOrchestrator:
                 "upload_date": self._entry_upload_date(entry),
             }
             for entry in pdf_dir.iterdir()
-            if entry.is_file() and entry.suffix.lower() in allowed_suffixes
+            if entry.is_file() and entry.suffix.lower() in allowed_suffixes and not entry.stem.startswith("doc_")
         ]
 
         return sorted(files, key=lambda item: item["pdf_name"].lower())

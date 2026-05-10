@@ -4,6 +4,7 @@ import { Toast } from "./components/Toast";
 import { FilesPage } from "./pages/FilesPage";
 import { HomePage } from "./pages/HomePage";
 import { QueryPage } from "./pages/QueryPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import "./app.css";
 
 function App() {
@@ -16,6 +17,7 @@ function App() {
           <Route path="/home" element={<HomePage />} />
           <Route path="/files" element={<FilesPage />} />
           <Route path="/query" element={<QueryPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/home" replace />} />
         </Routes>
       </main>

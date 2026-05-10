@@ -6,24 +6,12 @@ from pathlib import Path
 import time
 from typing import Any
 from typing import Iterator
-from typing import Sequence
 
-from schemas.response import QuerySourceItem
-from services.translator import translator_config as cfg
+from services.llm.base import DEFAULT_MODELS_DIR
+from services.llm.base import LLMClientProtocol
+from services.llm.base import StreamChunk
 
 logger = logging.getLogger(__name__)
-
-QUERY_SYSTEM_PROMPT = (
-    "You are an academic paper assistant. "
-    "Answer questions strictly based on provided source passages. "
-    "If the sources are insufficient, explicitly say what is missing. "
-    "Use the same language as the user's question. "
-    "Each source is formatted as: [Source N] Page X | Section: <section title>, followed by the source text. "
-    "The section title tells you what topic the source belongs to — use it to understand context. "
-    "Think step by step based on both the section titles and the source text, and provide detailed answers. "
-    "Math formatting rules: wrap inline mathematical symbols or variables with single dollar signs, e.g. $x$, $\\alpha$; "
-    "wrap standalone equations or multi-term formulas with double dollar signs on their own line, e.g. $$E = mc^2$$."
-)
 
 
 def ensure_model_ready(
@@ -59,13 +47,13 @@ def ensure_model_ready(
     return model_path
 
 
-class LlamaFactory:
+class LlamaFactory(LLMClientProtocol):
     def __init__(
         self,
-        model_dir: Path = cfg.DEFAULT_MODEL_DIR,
-        repo_id: str = cfg.HF_REPO_ID,
-        filename: str = cfg.HF_FILENAME,
-        n_gpu_layers: int = -1,
+        repo_id: str,
+        filename: str,
+        model_dir: Path = DEFAULT_MODELS_DIR,
+        n_gpu_layers: int = 0,
         n_ctx: int = 4096,
         verbose: bool = False,
     ) -> None:
@@ -119,6 +107,7 @@ class LlamaFactory:
         gc.collect()
         try:
             import torch as _torch
+
             if _torch.cuda.is_available():
                 _torch.cuda.empty_cache()
         except ImportError:  # pragma: no cover
@@ -151,47 +140,21 @@ class LlamaFactory:
         messages: list[dict[str, str]],
         max_tokens: int,
         temperature: float,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[StreamChunk]:
         if self._llm is None:
             raise RuntimeError("LlamaFactory 尚未載入模型，請在 with 區塊內呼叫")
 
-        return self._llm.create_chat_completion(
+        raw_stream = self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
             stream=True,
         )
-
-
-def _build_sources_block(sources: Sequence[QuerySourceItem]) -> str:
-    blocks: list[str] = []
-    for index, source in enumerate(sources, start=1):
-        header = f"[Source {index}] Page {source.page_idx + 1}"
-        if source.section_title.strip():
-            header += f" | Section: {source.section_title.strip()}"
-        blocks.append(f"{header}\n{source.text}")
-    return "\n\n".join(blocks)
-
-
-def build_query_messages(
-    question: str,
-    sources: Sequence[QuerySourceItem],
-    history: list[dict[str, str]] | None = None,
-) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": QUERY_SYSTEM_PROMPT}
-    ]
-
-    history_turns = (history or [])[-3:]
-    for turn in history_turns:
-        old_question = str(turn.get("question", "") or "").strip()
-        old_answer = str(turn.get("answer", "") or "").strip()
-        if old_question:
-            messages.append({"role": "user", "content": old_question})
-        if old_answer:
-            messages.append({"role": "assistant", "content": old_answer})
-
-    context_block = _build_sources_block(sources)
-    user_content = f"{context_block}\n\nQuestion: {question}"
-    messages.append({"role": "user", "content": user_content})
-    return messages
+        for chunk in raw_stream:
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta_text = str((choice.get("delta") or {}).get("content", "") or "")
+            finish_reason = choice.get("finish_reason")
+            yield StreamChunk(delta=delta_text, finish_reason=finish_reason)

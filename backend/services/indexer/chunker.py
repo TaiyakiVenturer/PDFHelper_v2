@@ -5,7 +5,6 @@ import logging
 import re
 from typing import Any
 
-from services.indexer import indexer_config as cfg
 from services.parser.content_merger import MinerUItem
 
 try:
@@ -15,6 +14,23 @@ except ImportError:  # pragma: no cover
 
 
 logger = logging.getLogger(__name__)
+
+
+TIKTOKEN_ENCODING = "cl100k_base"
+CHUNK_TOKEN_LIMIT = 512
+SPLIT_BOUNDARY_PUNCTUATION = (
+    "。",
+    ".",
+    "？",
+    "?",
+    "！",
+    "!",
+    "；",
+    ";",
+    "，",
+    ",",
+    " ",
+)
 
 
 @dataclass
@@ -36,7 +52,7 @@ class StructureAwareChunker:
     def __init__(self) -> None:
         if tiktoken is None:
             raise RuntimeError("tiktoken is not installed")
-        self._token_counter = tiktoken.get_encoding(cfg.TIKTOKEN_ENCODING)
+        self._token_counter = tiktoken.get_encoding(TIKTOKEN_ENCODING)
 
     def chunk(self, items: list[MinerUItem]) -> list[IndexChunk]:
         chunks: list[IndexChunk] = []
@@ -100,7 +116,7 @@ class StructureAwareChunker:
             return []
 
         embedding_text = self._compose_embedding_text(section_title, text)
-        if self._count_tokens(embedding_text) <= cfg.CHUNK_TOKEN_LIMIT:
+        if self._count_tokens(embedding_text) <= CHUNK_TOKEN_LIMIT:
             return [
                 (
                     embedding_text,
@@ -253,11 +269,11 @@ class StructureAwareChunker:
         if section_title.strip():
             prefix = f"{section_title.strip()}\n\n"
         prefix_tokens = self._count_tokens(prefix)
-        body_token_limit = max(1, cfg.CHUNK_TOKEN_LIMIT - prefix_tokens)
+        body_token_limit = max(1, CHUNK_TOKEN_LIMIT - prefix_tokens)
 
         while remaining:
             full_text = self._compose_embedding_text(section_title, remaining)
-            if self._count_tokens(full_text) <= cfg.CHUNK_TOKEN_LIMIT:
+            if self._count_tokens(full_text) <= CHUNK_TOKEN_LIMIT:
                 chunks.append(remaining.strip())
                 break
 
@@ -293,7 +309,7 @@ class StructureAwareChunker:
         window_start = max(0, bounded_target - 200)
         window = text[window_start:bounded_target]
 
-        for token in cfg.SPLIT_BOUNDARY_PUNCTUATION:
+        for token in SPLIT_BOUNDARY_PUNCTUATION:
             idx = window.rfind(token)
             if idx != -1:
                 return window_start + idx + len(token)

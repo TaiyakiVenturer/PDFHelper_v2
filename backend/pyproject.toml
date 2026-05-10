@@ -9,7 +9,8 @@ dependencies = [
     "fastapi>=0.120.0",
     "huggingface-hub>=0.34.0",
     "llama-cpp-python==0.3.4",
-    "mineru[core]>=3.0.8",
+    "openai>=1.0.0",
+    "mineru[pipeline]==3.1.10",
     "pydantic>=2.12.5",
     "sentence-transformers>=3.0.0",
     "tiktoken>=0.7.0",
@@ -21,20 +22,12 @@ dependencies = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu118"
-url = "https://download.pytorch.org/whl/cu118"
-explicit = true
-
-[[tool.uv.index]]
 name = "llama-cpp-cu121"
 url = "https://abetlen.github.io/llama-cpp-python/whl/cu121"
 explicit = true
 
 [tool.uv.sources]
 llama-cpp-python = { index = "llama-cpp-cu121" }
-torch = { index = "pytorch-cu118" }
-torchvision = { index = "pytorch-cu118" }
-torchaudio = { index = "pytorch-cu118" }
 
 [dependency-groups]
 dev = [
