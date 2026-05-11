@@ -73,7 +73,6 @@ def create_llm_factory(llm_cfg: LLMConfig) -> LLMClientProtocol:
             api_key=oa.api_key,
             model=oa.model,
             temperature=llm_cfg.temperature,
-            max_tokens=llm_cfg.max_tokens,
         )
 
     from services.llm.llama_factory import LlamaFactory

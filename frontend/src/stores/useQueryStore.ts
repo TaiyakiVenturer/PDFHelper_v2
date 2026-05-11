@@ -51,7 +51,7 @@ interface QueryState {
 function getQueryWsUrl(): string {
   const baseWsUrl =
     (import.meta.env.VITE_BACKEND_WS_ORIGIN as string | undefined)?.trim() ||
-    "ws://127.0.0.1:8080";
+    "ws://127.0.0.1:12230";
   return `${baseWsUrl.replace(/\/+$/, "")}/ws/query`;
 }
 

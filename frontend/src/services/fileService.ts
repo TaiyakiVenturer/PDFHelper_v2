@@ -16,7 +16,7 @@ interface FileListResponse {
 }
 
 const BACKEND_HTTP_ORIGIN = (import.meta.env.VITE_BACKEND_HTTP_ORIGIN as string | undefined)?.trim() ||
-  "http://127.0.0.1:8080";
+  "http://127.0.0.1:12230";
 const API_BASE = BACKEND_HTTP_ORIGIN.replace(/\/+$/, "");
 
 export type FileServiceErrorCode = "NETWORK" | "CONFLICT" | "BAD_REQUEST" | "NOT_FOUND" | "SERVER";

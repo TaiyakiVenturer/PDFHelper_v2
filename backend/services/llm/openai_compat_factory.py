@@ -19,13 +19,15 @@ class OpenAICompatFactory(LLMClientProtocol):
         api_key: str,
         model: str,
         temperature: float,
-        max_tokens: int,
+        strip_thinking: bool = True,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
-        self.max_tokens = max_tokens
+        self.strip_thinking = strip_thinking
+        self.extra_body = extra_body
         self._client: Any | None = None
 
     def __enter__(self) -> "OpenAICompatFactory":
@@ -58,7 +60,7 @@ class OpenAICompatFactory(LLMClientProtocol):
             messages=messages,  # type: ignore[arg-type]
             max_tokens=max_tokens,
             temperature=temperature,
-            reasoning_effort="none",
+            extra_body=self.extra_body,
         )
         return response.model_dump()
 
@@ -75,13 +77,55 @@ class OpenAICompatFactory(LLMClientProtocol):
             messages=messages,  # type: ignore[arg-type]
             max_tokens=max_tokens,
             temperature=temperature,
-            reasoning_effort="none",
             stream=True,
+            extra_body=self.extra_body,
         )
+        raw = self._iter_raw_chunks(stream)
+        yield from self._filter_thinking(raw) if self.strip_thinking else raw
+
+    def _iter_raw_chunks(self, stream: Any) -> Iterator[StreamChunk]:
         for chunk in stream:
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
-            delta_text = choice.delta.content or ""
-            finish_reason = choice.finish_reason
-            yield StreamChunk(delta=delta_text, finish_reason=finish_reason)
+            yield StreamChunk(delta=choice.delta.content or "", finish_reason=choice.finish_reason)
+
+    def _filter_thinking(self, source: Iterator[StreamChunk]) -> Iterator[StreamChunk]:
+        """Strip <think>...</think> blocks from a StreamChunk iterator."""
+        OPEN, CLOSE = "<think>", "</think>"
+        in_think = False
+        buf = ""
+
+        for chunk in source:
+            buf += chunk.delta
+            output = ""
+
+            while True:
+                if in_think:
+                    idx = buf.find(CLOSE)
+                    if idx != -1:
+                        buf = buf[idx + len(CLOSE):]
+                        in_think = False
+                    else:
+                        buf = buf[-(len(CLOSE) - 1):]
+                        break
+                else:
+                    idx = buf.find(OPEN)
+                    if idx != -1:
+                        output += buf[:idx]
+                        buf = buf[idx + len(OPEN):]
+                        in_think = True
+                    else:
+                        keep = len(OPEN) - 1
+                        if len(buf) > keep:
+                            output += buf[:-keep]
+                            buf = buf[-keep:]
+                        break
+
+            if output:
+                yield StreamChunk(delta=output, finish_reason=None)
+            if chunk.finish_reason:
+                yield StreamChunk(delta="", finish_reason=chunk.finish_reason)
+
+        if not in_think and buf:
+            yield StreamChunk(delta=buf, finish_reason=None)

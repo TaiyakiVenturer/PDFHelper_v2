@@ -280,25 +280,6 @@ export function SettingsPage() {
               onChange={(e) => updateConfig({ max_tokens: Number(e.target.value) })}
             />
           </label>
-
-          <label className="settings-label">
-            對話紀錄長度（輪）
-            <div className="settings-row-inline">
-              <input
-                type="number"
-                className="settings-input settings-input-sm"
-                min={1}
-                max={20}
-                step={1}
-                value={llm.query_history_turns}
-                onChange={(e) => {
-                  const raw = Math.floor(Number(e.target.value));
-                  updateConfig({ query_history_turns: Math.max(1, raw) });
-                }}
-              />
-              <span className="settings-hint">查詢時帶入的歷史對話輪數（1–20）</span>
-            </div>
-          </label>
         </div>
       </div>
 

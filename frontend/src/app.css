@@ -40,6 +40,73 @@ button {
   font: inherit;
 }
 
+.backend-startup {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.backend-startup-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 56px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.backend-startup-icon {
+  font-size: 2.8rem;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.backend-startup-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.backend-startup-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--bg-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+  margin: 12px 0 4px;
+}
+
+.backend-startup-text {
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+.backend-startup-error {
+  margin-top: 12px;
+  color: var(--error);
+  font-size: 0.8rem;
+  font-family: monospace;
+  max-width: 480px;
+  word-break: break-all;
+  background: #fff7f6;
+  border: 1px solid #efc1bd;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .app-shell {
   height: 100%;
   display: flex;

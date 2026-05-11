@@ -1,9 +1,13 @@
 [package]
 name = "tauri-app"
 version = "0.1.0"
-description = "A Tauri App"
+description = "PDFHelper"
 authors = ["you"]
 edition = "2021"
+
+[[bin]]
+name = "PDFHelper"
+path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
