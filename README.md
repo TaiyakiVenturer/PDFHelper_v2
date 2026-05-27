@@ -1,5 +1,7 @@
 # PDFHelper v2
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/TaiyakiVenturer/PDFHelper_v2)
+
 以 FastAPI 後端 + Tauri/React 前端為基礎的 PDF 學術論文助理，支援解析、翻譯、語意索引與 RAG 查詢。
 
 舊版（v1）：https://github.com/TaiyakiVenturer/PDFHelper
